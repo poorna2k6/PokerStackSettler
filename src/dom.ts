@@ -73,7 +73,12 @@ export function openSheet(title: string, build: (close: () => void) => Node): Sh
     document.removeEventListener('keydown', onKey);
     sheet.classList.remove('in');
     backdrop.classList.remove('in');
-    setTimeout(() => { sheet.remove(); backdrop.remove(); previous?.focus?.(); }, 220);
+    setTimeout(() => {
+      sheet.remove();
+      backdrop.remove();
+      // Hand focus back only when no other sheet took over (e.g. confirm -> rename sheet).
+      if (!root.querySelector('.sheet')) previous?.focus?.();
+    }, 220);
   };
   sheet.append(
     h('div', { class: 'sheet-grabber' }),
