@@ -63,7 +63,8 @@ export function toCents(val: unknown): number {
 
 /** "$100", "$1.50", "$0.25" */
 export function formatUnit(dollars: number): string {
-  return Number.isInteger(dollars) ? `$${dollars.toLocaleString('en-US')}` : `$${dollars.toFixed(2)}`;
+  const digits = Number.isInteger(dollars) ? 0 : 2;
+  return `$${dollars.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
 }
 
 export function formatCurrency(cents: number, showSign = false): string {
@@ -427,7 +428,7 @@ export function buildNotepad(s: SavedSession | (SessionData & { timestamp?: stri
     `Session Name   : ${s.name || 'Poker Cash Game'}`,
     `Saved Timestamp: ${stamp}`,
     `Session Status : ${status}`,
-    `1 Buy-In Unit  : $${s.defaultBuyIn}`,
+    `1 Buy-In Unit  : ${formatUnit(s.defaultBuyIn)}`,
     ...(audit.expenseCents > 0 ? [`Rake / Expense: ${formatCurrency(audit.expenseCents)} (paid to House / Expense Pot)`] : []),
     `Total Table Pot: ${formatCurrency(audit.totalBuyInCents)} (${formatBuyInCount(audit.totalBuyInCount)} across ${audit.players.length} players)`,
     `Table Balance  : ${audit.isBalanced ? 'BALANCED' : 'DISCREPANCY ' + formatCurrency(audit.discrepancyCents, true)}`,

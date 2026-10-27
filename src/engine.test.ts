@@ -84,6 +84,9 @@ describe('buy-in unit', () => {
     expect(formatUnit(100)).toBe('$100');
     expect(formatUnit(1.5)).toBe('$1.50');
     expect(formatUnit(0.25)).toBe('$0.25');
+    expect(formatUnit(1000)).toBe('$1,000');
+    expect(formatUnit(1500.5)).toBe('$1,500.50');
+    expect(buildNotepad({ id: 'x', name: 'n', defaultBuyIn: 1500.5, expenseCents: 0, isEnded: false, paid: {}, players: [P('a', 1, 1)] })).toContain('Unit  : $1,500.50');
   });
 });
 
