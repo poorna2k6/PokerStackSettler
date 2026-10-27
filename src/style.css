@@ -165,7 +165,7 @@ input::placeholder { color: var(--muted); } input:focus { outline: none; color: 
 .seat-name { font-size: 12px; font-weight: 700; max-width: 78px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-shadow: 0 1px 3px rgba(0,0,0,.7); }
 .seat-net { font-size: 11px; font-weight: 700; background: rgba(0,0,0,.65); padding: 1px 7px; border-radius: 99px; }
 .seat .avatar { position: relative; }
-.dealer { position: absolute; top: -6px; right: 8px; width: 20px; height: 20px; border-radius: 50%; background: #fff; color: #111; font-size: 11px; font-weight: 800; display: grid; place-items: center; box-shadow: 0 1px 4px rgba(0,0,0,.5); z-index: 1; }
+.dealer { position: absolute; top: 14px; right: -2px; width: 20px; height: 20px; border-radius: 50%; background: #fff; color: #111; font-size: 11px; font-weight: 800; display: grid; place-items: center; box-shadow: 0 1px 4px rgba(0,0,0,.5); z-index: 1; }
 .crown { position: absolute; top: -18px; font-size: 16px; }
 .oval.tiny .seat { width: 56px; } .oval.tiny .seat-name { font-size: 10px; max-width: 56px; } .oval.tiny .avatar { width: 26px; height: 34px; } .oval.tiny .avatar b { font-size: 13px; } .oval.tiny .avatar i { font-size: 11px; } .oval.tiny .seat-net { font-size: 9px; padding: 1px 5px; }
 

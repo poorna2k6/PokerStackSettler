@@ -374,7 +374,8 @@ export function buildNotepad(s: SavedSession | (SessionData & { timestamp?: stri
   const audit = solve(s.players, expense, s.defaultBuyIn);
   const stamp =
     ('timestamp' in s && s.timestamp) || new Date().toISOString().slice(0, 16).replace('T', ' ');
-  const status = ('status' in s && s.status) || 'Live Auto-Saved';
+  const status =
+    ('status' in s && s.status) || ('isEnded' in s && s.isEnded ? 'Completed & Settled' : 'Live Auto-Saved');
   const bar = '='.repeat(64);
   const dash = '-'.repeat(64);
 
@@ -386,6 +387,7 @@ export function buildNotepad(s: SavedSession | (SessionData & { timestamp?: stri
     `Saved Timestamp: ${stamp}`,
     `Session Status : ${status}`,
     `1 Buy-In Unit  : $${s.defaultBuyIn}`,
+    ...(audit.expenseCents > 0 ? [`Rake / Expense: ${formatCurrency(audit.expenseCents)} (paid to House / Expense Pot)`] : []),
     `Total Table Pot: ${formatCurrency(audit.totalBuyInCents)} (${formatBuyInCount(audit.totalBuyInCount)} across ${audit.players.length} players)`,
     `Table Balance  : ${audit.isBalanced ? 'BALANCED' : 'DISCREPANCY ' + formatCurrency(audit.discrepancyCents, true)}`,
     dash,

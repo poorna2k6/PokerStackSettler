@@ -287,6 +287,11 @@ function openAddPlayer() {
   openSheet('Add player', close => {
     const name = h('input', { attrs: { type: 'text', placeholder: 'Name', autocapitalize: 'words', autocomplete: 'off', 'aria-label': 'Player name', enterkeyhint: 'done' } });
     const count = h('input', { attrs: { type: 'text', inputmode: 'decimal', value: '1', 'aria-label': 'Number of buy-ins' } });
+    const countLabel = h('span', { text: `Buy-ins (× $${state.session.defaultBuyIn})` });
+    // On an empty table the unit can be chosen up front, before any buy-in is entered.
+    const unit = state.session.players.length === 0 && !state.session.isEnded
+      ? textInput(String(state.session.defaultBuyIn), v => { setUnit(v); countLabel.textContent = `Buy-ins (× $${state.session.defaultBuyIn})`; }, { mode: 'decimal', label: 'Buy-in unit' })
+      : null;
     const submit = (keepOpen: boolean) => {
       const n = parseFloat(count.value);
       addPlayer(name.value, Number.isFinite(n) ? n : 1);
@@ -295,7 +300,7 @@ function openAddPlayer() {
     };
     name.addEventListener('keydown', e => { if (e.key === 'Enter') submit(true); });
     return h('div', { class: 'sheet-body' },
-      group(field('Name', name), field(`Buy-ins (× $${state.session.defaultBuyIn})`, count)),
+      group(...(unit ? [field('Buy-in unit ($)', unit)] : []), field('Name', name), h('label', { class: 'row field' }, countLabel, count)),
       h('button', { class: 'btn primary block', text: 'Add & finish', on: { click: () => submit(false) } }),
       h('button', { class: 'btn tinted block', text: 'Add & next player', on: { click: () => submit(true) } }));
   });

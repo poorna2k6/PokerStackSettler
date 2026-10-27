@@ -57,7 +57,9 @@ export function openSheet(title: string, build: (close: () => void) => Node): Sh
   const previous = document.activeElement as HTMLElement | null;
   const backdrop = h('div', { class: 'backdrop' });
   const sheet = h('div', { class: 'sheet', attrs: { role: 'dialog', 'aria-modal': 'true', 'aria-label': title } });
+  const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') close(); };
   const close = () => {
+    document.removeEventListener('keydown', onKey);
     sheet.classList.remove('in');
     backdrop.classList.remove('in');
     setTimeout(() => { sheet.remove(); backdrop.remove(); previous?.focus?.(); }, 220);
@@ -70,7 +72,7 @@ export function openSheet(title: string, build: (close: () => void) => Node): Sh
     build(close)
   );
   backdrop.addEventListener('click', close);
-  sheet.addEventListener('keydown', e => { if (e.key === 'Escape') close(); });
+  document.addEventListener('keydown', onKey);
   root.append(backdrop, sheet);
   requestAnimationFrame(() => { sheet.classList.add('in'); backdrop.classList.add('in'); });
   (sheet.querySelector('input,button.primary') as HTMLElement | null)?.focus();
