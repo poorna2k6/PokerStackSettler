@@ -97,6 +97,12 @@ function tableView(): HTMLElement {
   const locked = s.isEnded;
   const view = h('div', { class: 'view' });
 
+  if (!state.storageOk) {
+    view.append(h('div', { class: 'demo-card warn-top', attrs: { role: 'alert' } },
+      h('div', { class: 'grow' }, h('strong', { text: '⚠️ Storage is blocked' }),
+        h('div', { class: 'small', text: 'Changes will be lost when you close this page. Use Settings → Export to keep a copy.' }))));
+  }
+
   if (s.isDemo) {
     view.append(h('div', { class: 'demo-card' },
       h('div', { class: 'grow' },
