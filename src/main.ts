@@ -288,7 +288,7 @@ function openPlayerSheet(id: string) {
 
 function openAddPlayer() {
   openSheet('Add player', close => {
-    const name = h('input', { attrs: { type: 'text', placeholder: 'Name', autocapitalize: 'words', autocomplete: 'off', 'aria-label': 'Player name', enterkeyhint: 'done' } });
+    const name = h('input', { attrs: { type: 'text', placeholder: 'Name', autocapitalize: 'words', autocomplete: 'off', 'aria-label': 'New player name', enterkeyhint: 'done' } });
     const count = h('input', { attrs: { type: 'text', inputmode: 'decimal', value: '1', 'aria-label': 'Number of buy-ins' } });
     const countLabel = h('span', { text: `Buy-ins (× ${formatUnit(state.session.defaultBuyIn)})` });
     // On an empty table the unit can be chosen up front, before any buy-in is entered.
@@ -351,7 +351,7 @@ function settleView(): HTMLElement {
   }
 
   view.append(header('Who pays whom', a.transfers.length ? 'tap to mark paid' : ''));
-  if (a.transfers.length === 0) {
+  if (a.transfers.length === 0 || !a.isBalanced || a.players.length < 2) {
     const msg = a.players.length < 2 ? 'Add at least 2 players to see payments'
       : !a.isBalanced ? 'Fix the chip mismatch to see payments'
       : 'No payments needed 🎉';
