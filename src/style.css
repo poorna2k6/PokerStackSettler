@@ -91,7 +91,7 @@ input::placeholder { color: var(--muted); } input:focus { outline: none; color: 
 .transfer.paid .amt { text-decoration: line-through; } .transfer.paid .who span { color: var(--muted); }
 .check { width: 26px; height: 26px; border-radius: 50%; border: 2px solid var(--muted); color: transparent; display: grid; place-items: center; font-size: 14px; font-weight: 800; flex-shrink: 0; transition: .15s; }
 .check.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
-.standing { gap: 12px; } .rank { width: 24px; text-align: center; color: var(--muted); font-weight: 700; }
+.standing { gap: 12px; } .standing .grow { overflow-wrap: anywhere; } .rank { width: 24px; text-align: center; color: var(--muted); font-weight: 700; }
 .session .chev { color: var(--muted); font-size: 22px; }
 .row.action { justify-content: space-between; } .row.action.destructive { color: var(--bad); }
 .row.action:active, .row.session:active, .transfer:active { background: var(--card2); }

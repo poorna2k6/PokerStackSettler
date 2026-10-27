@@ -1,4 +1,4 @@
-import { sanitizeBuyIn, sanitizePlayers, sanitizeSaved, toCents, uniqueSessionIds, type SavedSession, type SessionData } from './engine';
+import { sanitizeBuyIn, sanitizePaid, sanitizePlayers, sanitizeSaved, toCents, uniqueSessionIds, type SavedSession, type SessionData } from './engine';
 
 const VAULT_KEY = 'stacksettle_pro_vault_v2';
 const LIVE_KEY = 'stacksettle_live_autosave_v1';
@@ -42,10 +42,7 @@ export function loadLive(): SessionData | null {
   if (players.length === 0) return null;
   const legacyExpense = o.expenseDollars !== undefined ? toCents(o.expenseDollars) : 0;
   const expenseCents = o.expenseCents !== undefined ? Math.max(0, Math.round(Number(o.expenseCents)) || 0) : legacyExpense;
-  const paid: Record<string, boolean> = {};
-  if (o.paid && typeof o.paid === 'object') {
-    for (const [k, v] of Object.entries(o.paid as Record<string, unknown>)) if (v === true) paid[k] = true;
-  }
+  const paid = sanitizePaid(o.paid);
   return {
     id: typeof o.sessionId === 'string' ? o.sessionId : typeof o.id === 'string' ? o.id : 'sess_live',
     name: String(o.sessionName ?? o.name ?? 'Poker Session').slice(0, 80),

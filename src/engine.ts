@@ -345,6 +345,8 @@ export interface SavedSession {
   defaultBuyIn: number;
   expenseCents: number;
   players: Player[];
+  /** paid-transfer marks, so a settled game reopened from History keeps them */
+  paid?: Record<string, boolean>;
 }
 
 export const MIN_UNIT = 0.01;
@@ -361,6 +363,16 @@ export function sanitizeBuyIn(v: unknown): number {
   return parseBuyInUnit(v) ?? 100;
 }
 
+export function sanitizePaid(raw: unknown): Record<string, boolean> {
+  const out: Record<string, boolean> = {};
+  if (raw && typeof raw === 'object') {
+    for (const [k, v] of Object.entries(raw as Record<string, unknown>).slice(0, 400)) {
+      if (v === true && k.length <= 200) out[k] = true;
+    }
+  }
+  return out;
+}
+
 export function sanitizeSaved(raw: unknown): SavedSession | null {
   if (!raw || typeof raw !== 'object') return null;
   const o = raw as Record<string, unknown>;
@@ -373,7 +385,8 @@ export function sanitizeSaved(raw: unknown): SavedSession | null {
     status: String(o.status ?? 'Saved Snapshot').slice(0, 40),
     defaultBuyIn: sanitizeBuyIn(o.defaultBuyIn),
     expenseCents: safeCents(o.expenseCents),
-    players
+    players,
+    paid: sanitizePaid(o.paid)
   };
 }
 

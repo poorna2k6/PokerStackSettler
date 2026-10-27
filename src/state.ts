@@ -109,6 +109,12 @@ export function applyReconcile(mode: ReconcileMode) {
 
 export function togglePaid(key: string) {
   if (state.session.paid[key]) delete state.session.paid[key]; else state.session.paid[key] = true;
+  // keep the History copy of this session in step, so reopening it later shows the same paid marks
+  const saved = state.saved.find(x => x.id === state.session.id);
+  if (saved && !state.session.isDemo) {
+    saved.paid = { ...state.session.paid };
+    state.storageOk = saveVault(state.saved) && state.storageOk;
+  }
   commit();
 }
 
@@ -117,7 +123,8 @@ function snapshot(status: string): SavedSession {
   return {
     id: s.id, name: s.name, timestamp: stamp(), status,
     defaultBuyIn: s.defaultBuyIn, expenseCents: s.expenseCents,
-    players: s.players.map(p => ({ ...p }))
+    players: s.players.map(p => ({ ...p })),
+    paid: { ...s.paid }
   };
 }
 
@@ -164,7 +171,7 @@ export function loadSaved(id: string) {
   if (!s) return;
   state.session = {
     id: s.id, name: s.name, defaultBuyIn: s.defaultBuyIn, expenseCents: s.expenseCents,
-    isEnded: s.status.startsWith('Completed'), isDemo: false, players: s.players.map(p => ({ ...p })), paid: {}
+    isEnded: s.status.startsWith('Completed'), isDemo: false, players: s.players.map(p => ({ ...p })), paid: { ...(s.paid ?? {}) }
   };
   state.tab = 'table';
   commit();

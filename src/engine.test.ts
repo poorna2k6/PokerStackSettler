@@ -276,3 +276,11 @@ describe('formatCurrency', () => {
     expect(toCents(formatCurrency(123456))).toBe(123456);
   });
 });
+
+describe('saved session paid marks', () => {
+  it('keeps only true paid flags and survives a backup round trip', () => {
+    const raw = { id: 's', name: 'G', players: [{ id: 'a', name: 'a', buyInCents: 1, cashOutCents: 1 }], paid: { 'a->b:100': true, 'x': false, 'y': 'yes' } };
+    const parsed = parseBackup(JSON.stringify([raw]));
+    expect(parsed?.kind === 'vault' && parsed.sessions[0].paid).toEqual({ 'a->b:100': true });
+  });
+});
