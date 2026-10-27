@@ -4,7 +4,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { LIMITS, MAX_BODY_BYTES, handleShare, memoryStore } from './handler';
 
 // Local dev/preview only: many test browsers share one IP, so allow far more new shares than production.
-const DEV_LIMITS = { ...LIMITS, create: { max: 500, window: 3600 } };
+const DEV_LIMITS = { ...LIMITS, create: { max: 500, window: 3600 }, claim: { max: 2000, window: 3600 } };
 
 export function shareApiMiddleware() {
   const store = memoryStore();
