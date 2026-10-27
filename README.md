@@ -26,7 +26,8 @@ and the server rejects every write without it.
 
 - Host: **Table → Share** → *Start sharing* → send the link or code. *Stop sharing* kills it immediately.
 - Viewer: open the link, or **Settings → Join a live game** and enter the code. Viewers get a separate
-  read-only page; they never load or overwrite their own saved tables.
+  read-only page that opens on the **oval table** (tap a seat for that player's buy-ins, chips and net) and can
+  switch to a **list**; tables above 12 players show the list. It never loads or overwrites their own saved tables.
 - Data is stored for **7 days after the host's last change** (rolling), then deleted. Reads do not extend it.
 
 ### How it works

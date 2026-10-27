@@ -1,6 +1,6 @@
 import { h, haptic, openSheet, confirmSheet, setFocusFallback, toast } from './dom';
 import { clink, setSoundEnabled } from './sound';
-import { avatar, chipStack, group, header, kpi } from './ui';
+import { MAX_SEATS, avatar, chipStack, group, header, kpi, ovalTable } from './ui';
 import { formatCode, normalizeCode } from './shared';
 import { shareUrl, startSharing, stopSharing, sync } from './sync';
 import {
@@ -177,33 +177,13 @@ function tableView(): HTMLElement {
   return view;
 }
 
-const MAX_SEATS = 12;
 function seatsView(a: Audit, locked: boolean) {
-  const n = a.players.length;
-  const topId = [...a.players].sort((x, y) => y.netCents - x.netCents)[0]?.id;
-  const oval = h('div', { class: `oval ${n > 9 ? 'tiny' : ''}` },
-    h('div', { class: 'oval-center' },
-      h('div', { class: 'kpi-label', text: 'Pot' }),
-      h('div', { class: 'mono pot', text: formatCurrency(a.totalBuyInCents) }),
-      chipStack(a.totalBuyInCount, 8)));
-  a.players.forEach((p, i) => {
-    const ang = Math.PI / 2 + (2 * Math.PI * i) / n;
-    const seat = h('button', {
-      class: 'seat',
-      attrs: { 'aria-label': `${p.name}: ${formatBuyInCount(p.buyInCount)} in, net ${formatCurrency(p.netCents, true)}. Tap to edit.` },
-      on: { click: () => openPlayerSheet(p.id) }
-    },
-      avatar(i, p.name),
-      i === 0 ? h('span', { class: 'dealer', text: 'D', attrs: { 'aria-hidden': 'true' } }) : null,
-      h('span', { class: 'seat-name', text: p.name }),
-      h('span', { class: `seat-net mono ${p.netCents > 0 ? 'good' : p.netCents < 0 ? 'bad' : 'muted'}`, text: formatCurrency(p.netCents, true) }),
-      p.id === topId && p.netCents > 0 ? h('span', { class: 'crown', text: '👑', attrs: { 'aria-hidden': 'true' } }) : null);
-    seat.style.left = `${50 + 41 * Math.cos(ang)}%`;
-    seat.style.top = `${50 + 41 * Math.sin(ang)}%`;
-    oval.append(seat);
+  return ovalTable({
+    a,
+    label: p => `${p.name}: ${formatBuyInCount(p.buyInCount)} in, net ${formatCurrency(p.netCents, true)}. Tap to edit.`,
+    onSeat: p => openPlayerSheet(p.id),
+    hint: locked ? 'Tap a seat to view details' : 'Tap a seat to edit buy-ins and chips'
   });
-  return h('div', { class: 'oval-wrap' }, oval,
-    h('div', { class: 'foot', text: locked ? 'Tap a seat to view details' : 'Tap a seat to edit buy-ins and chips' }));
 }
 
 function shareStatus(): string {

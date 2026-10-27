@@ -250,3 +250,8 @@ input::placeholder { color: var(--muted); } input:focus { outline: none; color: 
 .link { min-height: 28px; }
 .step-label.stack { font-size: 10.5px; }
 .stepper button { position: relative; }
+
+.seat-in { font-size: 10px; color: rgba(255,255,255,.85); white-space: nowrap; }
+.oval.tiny .seat-in { display: none; }
+
+.demo-card.view-only { padding: 8px 12px; }
