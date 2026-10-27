@@ -1,4 +1,4 @@
-import { sanitizeBuyIn, sanitizePlayers, sanitizeSaved, toCents, type SavedSession, type SessionData } from './engine';
+import { sanitizeBuyIn, sanitizePlayers, sanitizeSaved, toCents, uniqueSessionIds, type SavedSession, type SessionData } from './engine';
 
 const VAULT_KEY = 'stacksettle_pro_vault_v2';
 const LIVE_KEY = 'stacksettle_live_autosave_v1';
@@ -67,7 +67,7 @@ export const saveLive = (s: SessionData) =>
 export function loadVault(): SavedSession[] {
   const raw = read(VAULT_KEY);
   if (!Array.isArray(raw)) return [];
-  return raw.map(sanitizeSaved).filter((s): s is SavedSession => s !== null);
+  return uniqueSessionIds(raw.map(sanitizeSaved).filter((s): s is SavedSession => s !== null));
 }
 export const saveVault = (v: SavedSession[]) => write(VAULT_KEY, v);
 

@@ -34,6 +34,9 @@ export interface Audit {
   transfers: Transfer[];
 }
 
+/** Key under which a transfer's paid state is stored (amount included, so edits reset it). */
+export const paidKey = (id: string, cents: number) => `${id}:${cents}`;
+
 export type ReconcileMode = 'proRataWinners' | 'equalSplit' | 'topWinner';
 
 export const HOUSE_ID = '__house_expense__';
@@ -60,12 +63,13 @@ export function toCents(val: unknown): number {
 
 /** "$100", "$1.50", "$0.25" */
 export function formatUnit(dollars: number): string {
-  return Number.isInteger(dollars) ? `$${dollars}` : `$${dollars.toFixed(2)}`;
+  return Number.isInteger(dollars) ? `$${dollars.toLocaleString('en-US')}` : `$${dollars.toFixed(2)}`;
 }
 
 export function formatCurrency(cents: number, showSign = false): string {
   const sign = cents < 0 ? '-' : showSign && cents > 0 ? '+' : '';
-  return `${sign}$${(Math.abs(cents) / 100).toFixed(2)}`;
+  const abs = (Math.abs(cents) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return `${sign}$${abs}`;
 }
 
 export function unitCentsFor(stdBuyInDollars: number): number {
@@ -81,7 +85,7 @@ export function formatBuyInCount(count: number): string {
 }
 
 function cleanName(name: unknown): string {
-  const s = String(name ?? '').trim().slice(0, MAX_NAME);
+  const s = (typeof name === 'string' || typeof name === 'number' ? String(name) : '').trim().slice(0, MAX_NAME);
   return s || 'Player';
 }
 
@@ -372,6 +376,17 @@ export function sanitizeSaved(raw: unknown): SavedSession | null {
   };
 }
 
+/** Makes session ids unique within one list, so open/delete always target a single entry. */
+export function uniqueSessionIds(list: SavedSession[]): SavedSession[] {
+  const seen = new Set<string>();
+  return list.map(s => {
+    let id = s.id;
+    while (seen.has(id)) id += '_';
+    seen.add(id);
+    return id === s.id ? s : { ...s, id };
+  });
+}
+
 export type ParsedBackup =
   | { kind: 'vault'; sessions: SavedSession[] }
   | { kind: 'session'; session: SavedSession };
@@ -388,7 +403,7 @@ export function parseBackup(text: string): ParsedBackup | null {
     return null;
   }
   if (Array.isArray(data)) {
-    const sessions = data.map(sanitizeSaved).filter((s): s is SavedSession => s !== null);
+    const sessions = uniqueSessionIds(data.map(sanitizeSaved).filter((s): s is SavedSession => s !== null));
     return sessions.length ? { kind: 'vault', sessions } : null;
   }
   const session = sanitizeSaved(data);
@@ -457,7 +472,7 @@ export function buildReceipt(
   const lines = [`♠️ ${name} — Final Settlement`, ''];
   if (audit.transfers.length === 0) lines.push('No payments needed.');
   audit.transfers.forEach(t =>
-    lines.push(`${paid[t.id] ? '✅' : '⬜'} ${t.fromName} ➡️ ${t.toName}: ${formatCurrency(t.amountCents)}`)
+    lines.push(`${paid[paidKey(t.id, t.amountCents)] ? '✅' : '⬜'} ${t.fromName} ➡️ ${t.toName}: ${formatCurrency(t.amountCents)}`)
   );
   lines.push('', 'Results:');
   [...audit.players]

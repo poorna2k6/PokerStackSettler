@@ -4,7 +4,7 @@ import { registerSW } from 'virtual:pwa-register';
 import { h, haptic, openSheet, confirmSheet, toast } from './dom';
 import { clink, setSoundEnabled } from './sound';
 import {
-  buildReceipt, formatBuyInCount, formatUnit, MAX_UNIT, MIN_UNIT, type Audit, formatCurrency, leaderboard, toCents, unitCentsFor,
+  buildReceipt, formatBuyInCount, formatUnit, parseBackup, MAX_UNIT, MIN_UNIT, type Audit, formatCurrency, leaderboard, toCents, unitCentsFor,
   type SavedSession
 } from './engine';
 import { PRESETS } from './presets';
@@ -402,7 +402,7 @@ function historyView(): HTMLElement {
   const view = h('div', { class: 'view' });
   const rows = leaderboard(state.saved);
 
-  view.append(header('Lifetime leaderboard', rows.length ? `${state.saved.length} sessions` : ''));
+  view.append(header('Lifetime leaderboard', rows.length ? `${state.saved.length} session${state.saved.length === 1 ? '' : 's'}` : ''));
   view.append(rows.length
     ? group(...rows.map((r, i) => h('div', { class: 'row standing' },
         h('span', { class: 'rank', text: i === 0 && r.netCents > 0 ? '🏆' : String(i + 1) }),
@@ -464,8 +464,19 @@ function settingsView(): HTMLElement {
     if (f.size > 5_000_000) { toast('File is too large', 'error'); return; }
     const reader = new FileReader();
     reader.onload = () => {
-      const msg = importBackup(String(reader.result ?? ''));
-      toast(msg ?? 'That file is not a StackSettle backup', msg ? 'ok' : 'error');
+      const text = String(reader.result ?? '');
+      const apply = () => {
+        const msg = importBackup(text);
+        toast(msg ?? 'That file is not a StackSettle backup', msg ? 'ok' : 'error');
+      };
+      const parsed = parseBackup(text);
+      if (parsed?.kind === 'session' && !state.session.isDemo && state.session.players.length > 0) {
+        confirmSheet({
+          title: 'Replace the current table?',
+          message: `Restoring “${parsed.session.name}” will replace the table you have open. Save it to History first if you need it.`,
+          confirmLabel: 'Restore', destructive: true, onConfirm: apply
+        });
+      } else apply();
     };
     reader.readAsText(f);
     file.value = '';

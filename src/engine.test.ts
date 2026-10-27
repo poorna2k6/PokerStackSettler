@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  buildNotepad, buyInCount, formatUnit, leaderboard, parseBuyInUnit, sanitizeBuyIn, parseBackup, reconcile, sanitizePlayers, settleNodes, solve,
-  toCents, type Player
+  buildNotepad, buildReceipt, buyInCount, paidKey, uniqueSessionIds, formatUnit, leaderboard, parseBuyInUnit, sanitizeBuyIn, parseBackup, reconcile, sanitizePlayers, settleNodes, solve,
+  formatCurrency, toCents, type Player
 } from './engine';
 
 const P = (id: string, bi: number, co: number): Player => ({ id, name: id, buyInCents: bi, cashOutCents: co });
@@ -239,5 +239,37 @@ describe('leaderboard', () => {
     ]);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ sessions: 2, netCents: 100 });
+  });
+});
+
+describe('receipt and import regressions', () => {
+  it('receipt marks paid transfers using the same key the UI stores', () => {
+    const audit = solve([P('a', 10000, 15000), P('b', 10000, 5000)]);
+    const t = audit.transfers[0];
+    const text = buildReceipt('G', audit, { [paidKey(t.id, t.amountCents)]: true });
+    expect(text).toContain('✅');
+    expect(buildReceipt('G', audit, {})).not.toContain('✅');
+  });
+
+  it('makes duplicate session ids unique so open/delete are unambiguous', () => {
+    const mk = (name: string) => ({ id: 'dup', name, timestamp: '', status: '', defaultBuyIn: 100, expenseCents: 0, players: [P('a', 1, 1)] });
+    const ids = uniqueSessionIds([mk('1'), mk('2'), mk('3')]).map(s => s.id);
+    expect(new Set(ids).size).toBe(3);
+    const parsed = parseBackup(JSON.stringify([mk('1'), mk('2')]));
+    expect(parsed?.kind === 'vault' && new Set(parsed.sessions.map(s => s.id)).size).toBe(2);
+  });
+
+  it('non-string player names become "Player", not [object Object]', () => {
+    expect(sanitizePlayers([{ id: 'x', name: { a: 1 }, buyInCents: 1, cashOutCents: 1 }])[0].name).toBe('Player');
+  });
+});
+
+describe('formatCurrency', () => {
+  it('groups thousands and signs', () => {
+    expect(formatCurrency(110000)).toBe('$1,100.00');
+    expect(formatCurrency(-123456789, true)).toBe('-$1,234,567.89');
+    expect(formatCurrency(5, true)).toBe('+$0.05');
+    expect(formatCurrency(0)).toBe('$0.00');
+    expect(toCents(formatCurrency(123456))).toBe(123456);
   });
 });

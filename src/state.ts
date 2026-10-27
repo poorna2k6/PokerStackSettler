@@ -60,7 +60,7 @@ export function commit() {
 }
 
 export const audit = () => solve(state.session.players, state.session.expenseCents, state.session.defaultBuyIn);
-export const paidKey = (id: string, cents: number) => `${id}:${cents}`;
+export { paidKey } from './engine';
 
 export function setTab(tab: Tab) { state.tab = tab; listeners.forEach(fn => fn()); }
 export function setTheme(theme: Theme) { state.theme = theme; state.storageOk = saveTheme(theme) && state.storageOk; listeners.forEach(fn => fn()); }
