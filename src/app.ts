@@ -1,6 +1,6 @@
 import { h, haptic, openSheet, confirmSheet, setFocusFallback, toast } from './dom';
 import { clink, setSoundEnabled } from './sound';
-import { avatar, chipStack, group, header, kpi } from './ui';
+import { MAX_SEATS, avatar, chipStack, group, header, kpi, ovalTable } from './ui';
 import { formatCode, normalizeCode } from './shared';
 import { shareUrl, startSharing, stopSharing, sync } from './sync';
 import {
@@ -73,14 +73,16 @@ function startFresh() {
   openAddPlayer();
 }
 
+const LINK_NOTE = '\n\nThis also stops your live view-only link.';
+
 function requestNew() {
   const s = state.session;
-  if (s.isDemo || s.players.length === 0) { startFresh(); return; }
+  if ((s.isDemo || s.players.length === 0) && !s.share) { startFresh(); return; }
   confirmSheet({
     title: 'Start a new session?',
     message: s.isEnded
-      ? 'The current settled session stays in History.'
-      : 'The current table will be replaced. Save it to History first if you need it.',
+      ? `The current settled session stays in History.${s.share ? LINK_NOTE : ''}`
+      : `The current table will be replaced. Save it to History first if you need it.${s.share ? LINK_NOTE : ''}`,
     confirmLabel: 'Start new session', destructive: !s.isEnded, onConfirm: startFresh
   });
 }
@@ -175,33 +177,13 @@ function tableView(): HTMLElement {
   return view;
 }
 
-const MAX_SEATS = 12;
 function seatsView(a: Audit, locked: boolean) {
-  const n = a.players.length;
-  const topId = [...a.players].sort((x, y) => y.netCents - x.netCents)[0]?.id;
-  const oval = h('div', { class: `oval ${n > 9 ? 'tiny' : ''}` },
-    h('div', { class: 'oval-center' },
-      h('div', { class: 'kpi-label', text: 'Pot' }),
-      h('div', { class: 'mono pot', text: formatCurrency(a.totalBuyInCents) }),
-      chipStack(a.totalBuyInCount, 8)));
-  a.players.forEach((p, i) => {
-    const ang = Math.PI / 2 + (2 * Math.PI * i) / n;
-    const seat = h('button', {
-      class: 'seat',
-      attrs: { 'aria-label': `${p.name}: ${formatBuyInCount(p.buyInCount)} in, net ${formatCurrency(p.netCents, true)}. Tap to edit.` },
-      on: { click: () => openPlayerSheet(p.id) }
-    },
-      avatar(i, p.name),
-      i === 0 ? h('span', { class: 'dealer', text: 'D', attrs: { 'aria-hidden': 'true' } }) : null,
-      h('span', { class: 'seat-name', text: p.name }),
-      h('span', { class: `seat-net mono ${p.netCents > 0 ? 'good' : p.netCents < 0 ? 'bad' : 'muted'}`, text: formatCurrency(p.netCents, true) }),
-      p.id === topId && p.netCents > 0 ? h('span', { class: 'crown', text: '👑', attrs: { 'aria-hidden': 'true' } }) : null);
-    seat.style.left = `${50 + 41 * Math.cos(ang)}%`;
-    seat.style.top = `${50 + 41 * Math.sin(ang)}%`;
-    oval.append(seat);
+  return ovalTable({
+    a,
+    label: p => `${p.name}: ${formatBuyInCount(p.buyInCount)} in, net ${formatCurrency(p.netCents, true)}. Tap to edit.`,
+    onSeat: p => openPlayerSheet(p.id),
+    hint: locked ? 'Tap a seat to view details' : 'Tap a seat to edit buy-ins and chips'
   });
-  return h('div', { class: 'oval-wrap' }, oval,
-    h('div', { class: 'foot', text: locked ? 'Tap a seat to view details' : 'Tap a seat to edit buy-ins and chips' }));
 }
 
 function shareStatus(): string {
@@ -222,7 +204,7 @@ function openShareSheet() {
       if (statusEl) statusEl.textContent = shareStatus();
     });
 
-    const draw = () => {
+    let draw = () => {
       const share = state.session.share;
       if (!share) {
         const start = h('button', { class: 'btn primary block', text: 'Start sharing', on: { click: async () => {
@@ -263,6 +245,8 @@ function openShareSheet() {
           onConfirm: async () => { const ok = await stopSharing(); toast(ok ? 'Sharing stopped' : 'Sharing stopped here — the link will expire on its own', ok ? 'ok' : 'error'); }
         }); } } }));
     };
+    const redraw = draw;
+    draw = () => { redraw(); (body.querySelector('input, button.primary') as HTMLElement | null)?.focus(); };
     draw();
     return body;
   });
@@ -298,10 +282,11 @@ function storageNote() {
 function stepper(id: string, buyIn: number, count: number, locked: boolean, after?: () => void) {
   const unit = unitCentsFor(state.session.defaultBuyIn);
   const bump = (d: number) => () => { haptic(); clink(); rebuy(id, d); after?.(); };
+  const who = state.session.players.find(p => p.id === id)?.name ?? 'player';
   return h('div', { class: 'stepper' },
-    h('button', { text: '−', attrs: { 'aria-label': 'Remove one buy-in', 'data-fk': `minus:${id}`, disabled: locked || buyIn < unit }, on: { click: bump(-1) } }),
-    h('span', { class: 'mono', text: `${formatBuyInCount(count)} · ${formatCurrency(buyIn)}` }),
-    h('button', { text: '+', attrs: { 'aria-label': 'Add one buy-in', 'data-fk': `plus:${id}`, disabled: locked }, on: { click: bump(1) } }));
+    h('button', { text: '−', attrs: { 'aria-label': `Remove one buy-in for ${who}`, 'data-fk': `minus:${id}`, disabled: locked || buyIn < unit }, on: { click: bump(-1) } }),
+    h('span', { class: `mono step-label ${`${formatBuyInCount(count)}${formatCurrency(buyIn)}`.length > 9 ? 'stack' : ''}` }, h('b', { text: formatBuyInCount(count) }), h('i', { class: 'sep', text: ' · ' }), h('em', { text: formatCurrency(buyIn) })),
+    h('button', { text: '+', attrs: { 'aria-label': `Add one buy-in for ${who}`, 'data-fk': `plus:${id}`, disabled: locked }, on: { click: bump(1) } }));
 }
 
 function confirmRemove(id: string, name: string, after?: () => void) {
@@ -349,7 +334,7 @@ function playerRow(i: number, id: string, name: string, buyIn: number, cashOut: 
   cash.classList.add('mono');
   const tone = net > 0 ? 'good' : net < 0 ? 'bad' : 'muted';
   return h('div', { class: 'row player' },
-    h('div', { class: 'player-top' },
+    h('div', { class: `player-top ${name.length > 14 ? 'wrapname' : ''}` },
       avatar(i, name),
       h('div', { class: 'player-name' },
         h('span', { class: 'player-name-text', text: name }),
@@ -395,7 +380,7 @@ function openAddPlayer() {
     const countLabel = h('span', { text: `Buy-ins (× ${formatUnit(state.session.defaultBuyIn)})` });
     // On an empty table the unit can be chosen up front, before any buy-in is entered.
     const unit = state.session.players.length === 0 && !state.session.isEnded
-      ? textInput(String(state.session.defaultBuyIn), v => { changeUnit(v); countLabel.textContent = `Buy-ins (× ${formatUnit(state.session.defaultBuyIn)})`; }, { mode: 'decimal', label: 'Buy-in unit' })
+      ? textInput(String(state.session.defaultBuyIn), v => { changeUnit(v); countLabel.textContent = `Buy-ins (× ${formatUnit(state.session.defaultBuyIn)})`; }, { mode: 'decimal', label: 'Buy-in unit for this session' })
       : null;
     const submit = (keepOpen: boolean) => {
       const n = parseFloat(count.value);
@@ -534,7 +519,15 @@ function historyView(): HTMLElement {
 function openSavedActions(s: SavedSession) {
   openSheet(s.name, close => h('div', { class: 'sheet-body' },
     h('p', { class: 'muted', text: `${s.timestamp} · ${s.players.length} players · ${s.status}` }),
-    h('button', { class: 'btn primary block', text: 'Open on Table', on: { click: () => { close(); loadSaved(s.id); } } }),
+    h('button', { class: 'btn primary block', text: 'Open on Table', on: { click: () => {
+      close();
+      if (!state.session.share) { loadSaved(s.id); return; }
+      confirmSheet({
+        title: 'Replace the current table?',
+        message: `The table you have open will be replaced.${LINK_NOTE}`,
+        confirmLabel: 'Open and stop link', destructive: true, onConfirm: () => loadSaved(s.id)
+      });
+    } } }),
     h('button', { class: 'btn tinted block', text: 'Download .txt', on: { click: () => { close(); download(`${safeFile(s.name)}_notepad.txt`, sessionText(s)); } } }),
     h('button', { class: 'btn danger block', text: 'Delete', on: { click: () => { close(); confirmSheet({
       title: `Delete “${s.name}”?`, message: 'This cannot be undone.', confirmLabel: 'Delete', destructive: true, onConfirm: () => deleteSaved(s.id) }); } } })));
@@ -583,10 +576,10 @@ function settingsView(): HTMLElement {
         toast(msg ?? 'That file is not a StackSettle backup', msg ? 'ok' : 'error');
       };
       const parsed = parseBackup(text);
-      if (parsed?.kind === 'session' && !state.session.isDemo && state.session.players.length > 0) {
+      if (parsed?.kind === 'session' && ((!state.session.isDemo && state.session.players.length > 0) || state.session.share)) {
         confirmSheet({
           title: 'Replace the current table?',
-          message: `Restoring “${parsed.session.name}” will replace the table you have open. Save it to History first if you need it.`,
+          message: `Restoring “${parsed.session.name}” will replace the table you have open. Save it to History first if you need it.${state.session.share ? LINK_NOTE : ''}`,
           confirmLabel: 'Restore', destructive: true, onConfirm: apply
         });
       } else apply();
@@ -609,10 +602,10 @@ function settingsView(): HTMLElement {
 
 function confirmNew(go: () => void) {
   const s = state.session;
-  if (s.isDemo || s.players.length === 0) { go(); return; }
+  if ((s.isDemo || s.players.length === 0) && !s.share) { go(); return; }
   confirmSheet({
     title: 'Replace the current table?',
-    message: 'The current table will be replaced. Save it to History first if you need it.',
+    message: `The current table will be replaced. Save it to History first if you need it.${s.share ? LINK_NOTE : ''}`,
     confirmLabel: 'Load demo', destructive: true, onConfirm: go
   });
 }
@@ -657,11 +650,11 @@ function render() {
   const bar = h('nav', { class: 'tabbar', attrs: { 'aria-label': 'Main' } },
     ...TABS.map(t => h('button', {
       class: `tab ${state.tab === t.id ? 'on' : ''}`,
-      attrs: { 'aria-current': state.tab === t.id ? 'page' : undefined, 'data-fk': `tab:${t.id}` },
+      attrs: { 'aria-current': state.tab === t.id ? 'page' : undefined, 'data-fk': `tab:${t.id}`, 'aria-label': t.id === 'settle' && settleBadge ? `${t.label}, ${settleBadge} unpaid` : t.label },
       on: { click: () => setTab(t.id) }
     },
-      h('span', { class: 'tab-icon', text: t.icon }),
-      t.id === 'settle' && settleBadge ? h('span', { class: 'badge', text: String(settleBadge) }) : null,
+      h('span', { class: 'tab-icon', text: t.icon, attrs: { 'aria-hidden': 'true' } }),
+      t.id === 'settle' && settleBadge ? h('span', { class: 'badge', text: String(settleBadge), attrs: { 'aria-hidden': 'true' } }) : null,
       h('span', { class: 'tab-label', text: t.label }))));
 
   app.replaceChildren(scroll, bar);
@@ -677,8 +670,6 @@ const fkOf = (el: Element) =>
 let lastFocus: string | null = null;
 let lastIndex = 0;
 let lastTabId: Tab | null = null;
-let tabDir = 0;
-let tabTimer: number | undefined;
 
 const focusables = () =>
   [...document.getElementById('app')!.querySelectorAll<HTMLElement>('button, input')].filter(
@@ -692,17 +683,8 @@ document.addEventListener('focusin', e => {
     lastIndex = Math.max(0, focusables().indexOf(t));
   }
 });
-// The Tab direction only matters for the re-render that the Tab itself triggers (an input committing on blur),
-// so it expires quickly; otherwise a later Enter/Space on a control would wrongly push focus forward.
-document.addEventListener('keydown', e => {
-  if (e.key !== 'Tab') { tabDir = 0; return; }
-  tabDir = e.shiftKey ? -1 : 1;
-  clearTimeout(tabTimer);
-  tabTimer = window.setTimeout(() => { tabDir = 0; }, 80);
-}, true);
 
 function restoreFocus() {
-  const dir = tabDir;
   if (!lastFocus || document.querySelector('#sheets .sheet')) return;
   const app = document.getElementById('app')!;
   const active = document.activeElement;
@@ -719,8 +701,7 @@ function restoreFocus() {
     i = items.findIndex(el => el.dataset.fk === `tab:${state.tab}`);
   }
   if (i < 0) i = Math.min(lastIndex, items.length - 1); // control vanished: stay at the same position
-  if (dir !== 0 && fkOf(items[i]) === lastFocus) i = Math.min(items.length - 1, Math.max(0, i + dir));
-  items[i].focus({ preventScroll: dir === 0 });
+  items[i].focus({ preventScroll: true });
 }
 setFocusFallback(restoreFocus);
 
@@ -743,6 +724,11 @@ const isTyping = () => {
   return a instanceof HTMLInputElement && document.getElementById('app')!.contains(a) && a.value !== a.defaultValue;
 };
 // Keyboard blur (Tab) flushes right away; a blur caused by a press waits for the release instead.
+// A text field commits on 'change', which can fire while focus is moving to another field (Tab, voice control,
+// autofill...). Rendering synchronously there would replace the field that is about to receive input, so
+// renders caused by a commit run one task later, when the newly focused field already holds its value.
+let committing = false;
+document.addEventListener('change', () => { committing = true; window.setTimeout(() => { committing = false; }, 0); }, true);
 document.addEventListener('focusout', () => { window.setTimeout(() => { if (!pointerActive) flushRender(); }, 0); });
 const pressStart = (e: Event) => {
   // Tapping empty space blurs the field on purpose; don't pull focus back to it afterwards.
@@ -761,5 +747,8 @@ const pressEnd = (e: Event) => {
 for (const type of ['pointerdown', 'mousedown', 'touchstart']) document.addEventListener(type, pressStart, true);
 for (const type of ['pointerup', 'pointercancel', 'mouseup', 'touchend', 'touchcancel']) document.addEventListener(type, pressEnd, true);
 document.addEventListener('click', () => { window.setTimeout(flushRender, 0); });
-subscribe(() => { if (pointerActive || isTyping()) renderPending = true; else renderAndKeepFocus(); });
+subscribe(() => {
+  if (committing) { renderPending = true; window.setTimeout(() => { if (!pointerActive) flushRender(); }, 0); return; }
+  if (pointerActive || isTyping()) renderPending = true; else renderAndKeepFocus();
+});
 render();

@@ -71,6 +71,18 @@ export function commit() {
 export const audit = () => solve(state.session.players, state.session.expenseCents, state.session.defaultBuyIn);
 export { paidKey } from './engine';
 
+type Share = NonNullable<SessionData['share']>;
+const replacedHooks: ((old: Share) => void)[] = [];
+/** Called when the open session is replaced while it was being shared, so its link can be stopped. */
+export const onShareOrphaned = (fn: (old: Share) => void) => replacedHooks.push(fn);
+
+/** Every path that swaps the open session goes through here, so a live link can never be orphaned. */
+function replaceSession(next: SessionData) {
+  const old = state.session.share;
+  if (old) replacedHooks.forEach(fn => fn(old));
+  state.session = next;
+}
+
 export function setShare(share: SessionData['share']) {
   state.session.share = share;
   commit();
@@ -182,9 +194,9 @@ export function endSession(): boolean {
 export function reopenSession() { state.session.isEnded = false; commit(); }
 
 export function newSession(p?: Preset) {
-  state.session = p ? fromPreset(p) : {
+  replaceSession(p ? fromPreset(p) : {
     id: uid('sess'), name: 'New Poker Session', defaultBuyIn: 100, expenseCents: 0, isEnded: false, isDemo: false, players: [], paid: {}
-  };
+  });
   state.tab = 'table';
   commit();
 }
@@ -192,10 +204,10 @@ export function newSession(p?: Preset) {
 export function loadSaved(id: string) {
   const s = state.saved.find(x => x.id === id);
   if (!s) return;
-  state.session = {
+  replaceSession({
     id: s.id, name: s.name, defaultBuyIn: s.defaultBuyIn, expenseCents: s.expenseCents,
     isEnded: s.status.startsWith('Completed'), isDemo: false, players: s.players.map(p => ({ ...p })), paid: { ...(s.paid ?? {}) }
-  };
+  });
   state.tab = 'table';
   commit();
 }
@@ -228,10 +240,10 @@ export function importBackup(text: string): string | null {
     return added.length === 0 ? 'Those sessions are already in History' : `Imported ${added.length} session${added.length === 1 ? '' : 's'}`;
   }
   const s = parsed.session;
-  state.session = {
+  replaceSession({
     id: s.id, name: s.name, defaultBuyIn: s.defaultBuyIn, expenseCents: s.expenseCents,
     isEnded: false, isDemo: false, players: s.players, paid: {}
-  };
+  });
   state.tab = 'table';
   commit();
   return `Restored “${s.name}”`;

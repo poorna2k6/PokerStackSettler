@@ -2,7 +2,7 @@
 // it pushes snapshots to /api/share using a secret host key that never leaves this device.
 import { toast } from './dom';
 import { normalizeCode, type SharedSnapshot } from './shared';
-import { notify, onCommit, setShare, shareSnapshot, state } from './state';
+import { notify, onCommit, onShareOrphaned, setShare, shareSnapshot, state } from './state';
 
 const API = '/api/share';
 const PUSH_DELAY_MS = 600;
@@ -71,6 +71,46 @@ export async function stopSharing(): Promise<boolean> {
   return confirmed;
 }
 
+// --- links that outlived their table ---------------------------------------------------------------
+// Replacing the open table (new session, demo, open from History, restore) ends its live link. The stop
+// request is remembered on this device until the server confirms, so the host key is never simply lost.
+const PENDING_KEY = 'stacksettle_pending_stops_v1';
+type Pending = { code: string; hostKey: string };
+
+function readPending(): Pending[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(PENDING_KEY) ?? '[]') as unknown;
+    if (!Array.isArray(raw)) return [];
+    return raw.filter((p): p is Pending => !!p && typeof p.code === 'string' && typeof p.hostKey === 'string').slice(0, 20);
+  } catch { return []; }
+}
+function writePending(list: Pending[]) {
+  try { localStorage.setItem(PENDING_KEY, JSON.stringify(list.slice(0, 20))); } catch { /* storage blocked */ }
+}
+
+let draining = false;
+async function drainPendingStops() {
+  if (draining) return;
+  draining = true;
+  try {
+    for (const p of readPending()) {
+      try {
+        const r = await call('DELETE', `?code=${p.code}`, undefined, p.hostKey);
+        // 200 stopped, 404 already gone, 403 not ours any more: all mean there is nothing left to stop
+        if (r.status === 200 || r.status === 404 || r.status === 403) writePending(readPending().filter(x => x.code !== p.code));
+      } catch { /* offline: keep it and try again later */ }
+    }
+  } finally {
+    draining = false;
+  }
+}
+
+onShareOrphaned(old => {
+  writePending([...readPending().filter(p => p.code !== old.code), old]);
+  setPhase('off', '');
+  void drainPendingStops();
+});
+
 let timer: number | undefined;
 let retryTimer: number | undefined;
 let inFlight = false;
@@ -117,10 +157,11 @@ function schedule() {
 }
 
 onCommit(schedule);
-window.addEventListener('online', () => { if (state.session.share) { clearTimeout(retryTimer); void flush(); } });
+window.addEventListener('online', () => { void drainPendingStops(); if (state.session.share) { clearTimeout(retryTimer); void flush(); } });
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && state.session.share && sync.phase === 'offline') void flush();
 });
+void drainPendingStops();
 // A session restored from storage that was being shared: push the current state (and refresh its 7 days).
 if (state.session.share && !state.session.isDemo) { setPhase('syncing'); void flush(); }
 
