@@ -1,6 +1,8 @@
 // Read-only live view of a shared table. It never loads or writes the device's own session, has no
 // edit controls, and holds no host key: all it can do is poll GET /api/share.
 import { h, openSheet } from './dom';
+import { openHandsSheet } from './hands';
+import { drawSettlement, sharePicture } from './picture';
 import { formatBuyInCount, formatCurrency, formatUnit, paidKey, solve } from './engine';
 import { formatCode, normalizeCode, type SharedSnapshot } from './shared';
 import { THEMES, loadTheme } from './storage';
@@ -30,6 +32,12 @@ export function mountViewer(rawCode: string) {
   let view: 'table' | 'list' = 'table';
   let statusEl: HTMLElement | null = null;
 
+  // "That's me": remembered for this browser tab only (sessionStorage), never in the device's saved data.
+  const ME_KEY = `viewer-me:${code ?? ''}`;
+  const readMe = (): string | null => { try { return sessionStorage.getItem(ME_KEY); } catch { return null; } };
+  const writeMe = (id: string | null) => { try { if (id) sessionStorage.setItem(ME_KEY, id); else sessionStorage.removeItem(ME_KEY); } catch { /* ignore */ } };
+  let meId: string | null = readMe();
+
   const leave = () => { history.replaceState(null, '', location.pathname); location.reload(); };
 
   function body(): Node[] {
@@ -47,6 +55,7 @@ export function mountViewer(rawCode: string) {
       h('div', { class: 'demo-card view-only' },
         h('div', { class: 'grow' }, h('strong', { text: '👀 View only' }), h('span', { class: 'small', text: ' — only the host can make changes' })))
     ];
+    out.push(h('button', { class: 'btn tinted block slim', text: '🃏 New to poker? How hands rank', on: { click: openHandsSheet } }));
     out.push(h('div', { class: 'kpis' },
       kpi('Players', String(a.players.length)),
       kpi('Pot', formatCurrency(a.totalBuyInCents), `${a.totalBuyInCount} buy-in${a.totalBuyInCount === 1 ? '' : 's'}`),
@@ -58,6 +67,7 @@ export function mountViewer(rawCode: string) {
         attrs: { role: 'tab', 'aria-selected': view === m },
         on: { click: () => { view = m; render(); } }
       })));
+    out.push(meCard(a));
     out.push(h('div', { class: 'players-head' },
       h('span', { class: 'section-inline', text: `Players · ${formatUnit(snap.defaultBuyIn)}/buy-in`, attrs: { role: 'heading', 'aria-level': 2 } }), seg));
 
@@ -70,11 +80,12 @@ export function mountViewer(rawCode: string) {
         label: p => `${p.name}: ${formatBuyInCount(p.buyInCount)} in, chips ${formatCurrency(p.cashOutCents)}, net ${formatCurrency(p.netCents, true)}. Tap for details.`,
         onSeat: p => openSeatDetails(p, snap!.defaultBuyIn),
         note: p => `${formatBuyInCount(p.buyInCount)} · ${formatCurrency(p.buyInCents)}`,
-        hint: 'Tap a seat for details'
+        hint: 'Tap a seat for details',
+        highlightId: meId ?? undefined
       }));
     } else {
       if (view === 'table' && tooMany) out.push(h('div', { class: 'foot', text: `Table view fits up to ${MAX_SEATS} players — showing the list instead.` }));
-      out.push(group(...a.players.map((p, i) => h('div', { class: 'row player view-row' },
+      out.push(group(...a.players.map((p, i) => h('div', { class: `row player view-row ${p.id === meId ? 'me' : ''}` },
         h('div', { class: 'player-top' },
           avatar(i, p.name),
           h('div', { class: 'player-name' }, h('span', { class: 'player-name-text', text: p.name })),
@@ -105,7 +116,54 @@ export function mountViewer(rawCode: string) {
     } else if (a.players.length >= 2) {
       out.push(group(h('div', { class: 'row banner info' }, h('span', { text: 'The host is still entering chips — payments appear once the table balances.' }))));
     }
+    if (a.players.length >= 2) {
+      out.push(header('Standings'));
+      out.push(group(...[...a.players].sort((x, y) => y.netCents - x.netCents).map((p, i) =>
+        h('div', { class: `row standing ${i === 0 && p.netCents > 0 ? 'gold' : ''} ${p.id === meId ? 'me' : ''}` },
+          h('span', { class: 'rank', text: i === 0 && p.netCents > 0 ? '🏆' : String(i + 1) }),
+          h('span', { class: 'grow', text: p.name }),
+          h('span', { class: 'muted mono', text: formatBuyInCount(p.buyInCount) }),
+          h('span', { class: `mono ${p.netCents > 0 ? 'good' : p.netCents < 0 ? 'bad' : 'muted'}`, text: formatCurrency(p.netCents, true) })))));
+    }
+    if (a.players.length >= 2 && a.isBalanced) {
+      out.push(h('button', { class: 'btn tinted block', text: '🖼️ Save as picture', on: { click: () => sharePicture(drawSettlement(snap!.name, a, k => Boolean(snap!.paid[k])), 'settlement.png', snap!.name) } }));
+    }
     return out;
+  }
+
+  function meCard(a: ReturnType<typeof solve>): Node {
+    const me = a.players.find(p => p.id === meId);
+    if (!me) {
+      return h('button', { class: 'btn tinted block slim', text: '👤 That’s me — pick your name', on: { click: pickMe } });
+    }
+    const lines: Node[] = [];
+    if (a.players.length >= 2 && a.isBalanced) {
+      for (const t of a.transfers) {
+        const paid = Boolean(snap!.paid[paidKey(t.id, t.amountCents)]);
+        if (t.fromId === me.id) lines.push(h('div', { class: 'me-line' }, h('span', { class: 'bad', text: `You pay ${t.toName}` }), h('strong', { class: 'mono', text: `${formatCurrency(t.amountCents)}${paid ? ' ✓' : ''}` })));
+        else if (t.toId === me.id) lines.push(h('div', { class: 'me-line' }, h('span', { class: 'good', text: `${t.fromName} pays you` }), h('strong', { class: 'mono', text: `${formatCurrency(t.amountCents)}${paid ? ' ✓' : ''}` })));
+      }
+      if (lines.length === 0) lines.push(h('div', { class: 'me-line muted', text: 'You don’t owe or receive anything.' }));
+    } else {
+      lines.push(h('div', { class: 'me-line muted', text: 'Your payments appear here once the table balances.' }));
+    }
+    return h('div', { class: 'me-card' },
+      h('div', { class: 'me-head' },
+        h('strong', { text: `You: ${me.name}` }),
+        h('span', { class: `mono ${me.netCents > 0 ? 'good' : me.netCents < 0 ? 'bad' : 'muted'}`, text: formatCurrency(me.netCents, true) }),
+        h('button', { class: 'link', text: 'Not you?', on: { click: pickMe } })),
+      ...lines);
+  }
+
+  function pickMe() {
+    if (!snap) return;
+    const players = snap.players;
+    openSheet('Which player are you?', close => h('div', { class: 'sheet-body' },
+      h('p', { class: 'muted small', text: 'We’ll highlight your seat and show what you pay or receive. Only saved in this browser tab.' }),
+      group(...players.map(p => h('button', { class: 'row action', on: { click: () => { writeMe(p.id); meId = p.id; close(); render(); } } },
+        h('span', { class: 'grow', text: p.name })))),
+      ...(meId ? [h('button', { class: 'btn plain block', text: 'Clear', on: { click: () => { writeMe(null); meId = null; close(); render(); } } })] : []),
+      h('button', { class: 'btn plain block', text: 'Cancel', on: { click: close } })));
   }
 
   function openSeatDetails(p: { name: string; buyInCount: number; buyInCents: number; cashOutCents: number; netCents: number }, unit: number) {

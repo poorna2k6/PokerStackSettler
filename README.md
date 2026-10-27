@@ -48,3 +48,10 @@ phone (host) --PUT x-host-key--> /api/share --> Redis (7-day TTL)  <--GET (poll 
 
 Abuse limits (per hour): 10 new shares / IP, 1500 host updates / code, 20,000 polls / IP, 40 unknown-code lookups / IP
 (stops code guessing). Share codes are 8 characters from a 32-symbol alphabet (40 bits). Payloads are capped at 32 KB.
+
+## Learning aids and sharing extras
+- **🃏 How hands rank** (Settings, Table tab, and the shared link): the ten poker hands, strongest first, drawn with
+  real card faces, plus "how a hand goes" and a short glossary. Works offline.
+- **That's me** (shared link): pick your name to highlight your seat and see what you pay or receive.
+- **Standings** and **Save as picture** (settled tables) on both the host's Settle tab and the shared link.
+- Parked ideas live in [`docs/ROADMAP.md`](docs/ROADMAP.md).

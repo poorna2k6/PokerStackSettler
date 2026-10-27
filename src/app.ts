@@ -2,6 +2,8 @@ import { h, haptic, openSheet, confirmSheet, setFocusFallback, toast } from './d
 import { clink, setSoundEnabled } from './sound';
 import { MAX_SEATS, avatar, chipStack, group, header, kpi, ovalTable } from './ui';
 import { formatCode, normalizeCode } from './shared';
+import { openHandsSheet } from './hands';
+import { drawSettlement, sharePicture } from './picture';
 import { shareUrl, startSharing, stopSharing, sync } from './sync';
 import {
   buildReceipt, formatBuyInCount, formatUnit, parseBackup, MAX_UNIT, MIN_UNIT, type Audit, formatCurrency, leaderboard, toCents, unitCentsFor,
@@ -172,6 +174,7 @@ function tableView(): HTMLElement {
     }),
     ...(s.players.length < 2 && !locked ? [h('div', { class: 'foot', text: 'Add at least 2 players to settle' })] : []),
     ...(s.share ? [h('div', { class: 'foot share-foot', text: shareStatus() })] : []),
+    h('button', { class: 'link center', text: '🃏 How hands rank', on: { click: openHandsSheet } }),
     h('div', { class: 'foot' }, storageNote())
   );
   return view;
@@ -486,6 +489,7 @@ function settleView(): HTMLElement {
     h('div', { class: 'two' },
       h('button', { class: 'btn tinted', text: 'Save to history', on: { click: () => { if (saveToHistory(s.isEnded ? 'Completed & Settled' : 'Saved Snapshot')) toast('Saved to History'); else toast('Demo data isn’t saved — start fresh', 'error'); } } }),
       h('button', { class: 'btn tinted', text: 'Download .txt', on: { click: () => download(`${safeFile(s.name)}_settlement.txt`, sessionText(s)) } })),
+    ...(a.isBalanced && a.players.length >= 2 ? [h('button', { class: 'btn tinted block', text: '🖼️ Save as picture', on: { click: () => sharePicture(drawSettlement(s.name, a, k => Boolean(s.paid[k])), `${safeFile(s.name)}_settlement.png`, s.name) } })] : []),
     ...(s.isEnded ? [] : [h('button', { class: 'btn plain block', text: 'End & settle…', attrs: { disabled: a.players.length < 2 }, on: { click: requestEnd } })])
   );
   return view;
@@ -549,6 +553,9 @@ function settingsView(): HTMLElement {
     class: 'row action', attrs: { role: 'switch', 'aria-checked': state.prefs.sound },
     on: { click: () => { const on = !state.prefs.sound; setSoundEnabled(on); setPrefs({ sound: on }); clink(); } }
   }, h('span', { class: 'grow', text: 'Chip sounds' }), h('span', { class: `switch ${state.prefs.sound ? 'on' : ''}` }, h('i')))));
+
+  view.append(header('Learn'));
+  view.append(group(h('button', { class: 'row action', on: { click: openHandsSheet } }, h('span', { class: 'grow', text: '🃏 How hands rank' }), h('span', { class: 'muted', text: 'for new players ›' }))));
 
   view.append(header('Live games'));
   view.append(group(
