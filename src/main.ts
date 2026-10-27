@@ -143,9 +143,12 @@ function tableView(): HTMLElement {
 
   if (s.players.length === 0) {
     view.append(group(h('div', { class: 'row empty' }, h('span', { text: 'No players yet — add the first seat.' }))));
-  } else if (state.prefs.view === 'table') {
+  } else if (state.prefs.view === 'table' && s.players.length <= MAX_SEATS) {
     view.append(seatsView(a, locked));
   } else {
+    if (state.prefs.view === 'table') {
+      view.append(h('div', { class: 'foot', text: `Table view fits up to ${MAX_SEATS} players — showing the list instead.` }));
+    }
     view.append(group(...a.players.map((p, i) => playerRow(i, p.id, p.name, p.buyInCents, p.cashOutCents, p.buyInCount, p.netCents, locked))));
   }
   if (!locked) {
@@ -171,6 +174,7 @@ function tableView(): HTMLElement {
   return view;
 }
 
+const MAX_SEATS = 12;
 const SUITS = ['♠', '♥', '♦', '♣'];
 const initial = (name: string) => (name.trim().match(/[\p{L}\p{N}]/u)?.[0] ?? '?').toUpperCase();
 
