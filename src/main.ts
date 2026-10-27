@@ -679,16 +679,24 @@ const isTyping = () => {
   const a = document.activeElement;
   return a instanceof HTMLInputElement && document.getElementById('app')!.contains(a) && a.value !== a.defaultValue;
 };
-document.addEventListener('focusout', () => { window.setTimeout(flushRender, 0); });
-document.addEventListener('pointerdown', e => {
+// Keyboard blur (Tab) flushes right away; a blur caused by a press waits for the release instead.
+document.addEventListener('focusout', () => { window.setTimeout(() => { if (!pointerActive) flushRender(); }, 0); });
+const pressStart = (e: Event) => {
   // Tapping empty space blurs the field on purpose; don't pull focus back to it afterwards.
-  if (!(e.target instanceof Element && e.target.closest('button, input, [role="checkbox"]'))) lastFocus = null;
+  if (e.type === 'pointerdown' && !(e.target instanceof Element && e.target.closest('button, input, [role="checkbox"]'))) lastFocus = null;
   pointerActive = true;
   clearTimeout(pointerTimer);
   pointerTimer = window.setTimeout(flushRender, 1500); // safety net if the release is never seen
-}, true);
-for (const type of ['pointerup', 'pointercancel']) {
-  document.addEventListener(type, () => { window.setTimeout(flushRender, 0); }, true);
-}
+};
+// Touch taps fire pointerup first and the compatibility mouse events (where focus and blur happen) a moment
+// later, so after a touch release we keep deferring until the click arrives (or a short timeout).
+const pressEnd = (e: Event) => {
+  clearTimeout(pointerTimer);
+  const touch = e.type.startsWith('touch') || (e instanceof PointerEvent && e.pointerType === 'touch');
+  pointerTimer = window.setTimeout(flushRender, touch ? 400 : 0);
+};
+for (const type of ['pointerdown', 'mousedown', 'touchstart']) document.addEventListener(type, pressStart, true);
+for (const type of ['pointerup', 'pointercancel', 'mouseup', 'touchend', 'touchcancel']) document.addEventListener(type, pressEnd, true);
+document.addEventListener('click', () => { window.setTimeout(flushRender, 0); });
 subscribe(() => { if (pointerActive || isTyping()) renderPending = true; else renderAndKeepFocus(); });
 render();
