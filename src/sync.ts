@@ -1,6 +1,6 @@
 // Host side of live sharing. The host's device stays the single source of truth and the only writer:
 // it pushes snapshots to /api/share using a secret host key that never leaves this device.
-import { toast } from './dom';
+import { confirmSheet, toast } from './dom';
 import { normalizeCode, type SharedSnapshot } from './shared';
 import { notify, onCommit, onShareOrphaned, setShare, shareSnapshot, state } from './state';
 
@@ -22,7 +22,7 @@ const clock = () => new Date().toTimeString().slice(0, 8);
 
 interface Reply<T> { status: number; data: T }
 
-async function call<T>(method: string, query: string, body?: unknown, hostKey?: string): Promise<Reply<T>> {
+export async function call<T>(method: string, query: string, body?: unknown, hostKey?: string): Promise<Reply<T>> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 10000);
   try {
@@ -38,6 +38,18 @@ async function call<T>(method: string, query: string, body?: unknown, hostKey?: 
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** This phone is no longer the host. The local copy stays; the person can watch live instead. */
+export function handedOver(code: string, who?: string) {
+  if (state.session.share?.code === code) setShare(undefined);
+  setPhase('off', '');
+  confirmSheet({
+    title: 'Table handed over',
+    message: `${who ? `${who} is` : 'Someone else is'} now the host of “${state.session.name}”. Your own copy stays on this phone.`,
+    confirmLabel: 'Watch live', cancelLabel: 'Keep my copy',
+    onConfirm: () => { location.hash = `#/v/${code}`; }
+  });
 }
 
 export const shareUrl = (code: string) => `${location.origin}${location.pathname}#/v/${code}`;
@@ -126,7 +138,10 @@ async function flush() {
     const r = await call('PUT', `?code=${share.code}`, { snapshot: shareSnapshot() }, share.hostKey);
     if (r.status === 200) {
       setPhase('ok', clock());
-    } else if (r.status === 404 || r.status === 403) {
+    } else if (r.status === 403) {
+      // the host key no longer matches: the table was handed to someone else
+      handedOver(share.code);
+    } else if (r.status === 404) {
       // expired (7 days without a host edit) or stopped elsewhere
       setShare(undefined);
       setPhase('expired', '');

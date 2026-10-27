@@ -3,6 +3,7 @@ import { clink, setSoundEnabled } from './sound';
 import { MAX_SEATS, avatar, chipStack, group, header, kpi, ovalTable } from './ui';
 import { formatCode, normalizeCode } from './shared';
 import { openHandsSheet } from './hands';
+import { openHandoverSheet } from './handover';
 import { drawSettlement, sharePicture } from './picture';
 import { shareUrl, startSharing, stopSharing, sync } from './sync';
 import {
@@ -242,6 +243,7 @@ function openShareSheet() {
           h('button', { class: 'btn tinted', text: 'Copy code', on: { click: () => copyText(formatCode(share.code)) } })),
         statusEl,
         h('p', { class: 'muted small', text: 'Viewers can’t edit anything. The link stays valid for 7 days after your last change, or until you stop sharing.' }),
+        h('button', { class: 'btn tinted block', text: '🎩 Hand over the table', on: { click: () => { close(); openHandoverSheet(); } } }),
         h('button', { class: 'btn danger block', text: 'Stop sharing', on: { click: () => { close(); confirmSheet({
           title: 'Stop sharing?', message: 'The link and code stop working immediately for everyone watching.',
           confirmLabel: 'Stop sharing', destructive: true,

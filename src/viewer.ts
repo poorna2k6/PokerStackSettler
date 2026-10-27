@@ -1,10 +1,11 @@
 // Read-only live view of a shared table. It never loads or writes the device's own session, has no
 // edit controls, and holds no host key: all it can do is poll GET /api/share.
-import { h, openSheet } from './dom';
+import { h, openSheet, toast } from './dom';
 import { openHandsSheet } from './hands';
 import { drawSettlement, sharePicture } from './picture';
 import { formatBuyInCount, formatCurrency, formatUnit, paidKey, solve } from './engine';
-import { formatCode, normalizeCode, type SharedSnapshot } from './shared';
+import { makeHostKey } from './keys';
+import { formatCode, normalizeCode, type PublicOffer, type SharedSnapshot } from './shared';
 import { THEMES, loadTheme } from './storage';
 import { MAX_SEATS, avatar, chipStack, group, header, kpi, ovalTable } from './ui';
 
@@ -38,6 +39,64 @@ export function mountViewer(rawCode: string) {
   const writeMe = (id: string | null) => { try { if (id) sessionStorage.setItem(ME_KEY, id); else sessionStorage.removeItem(ME_KEY); } catch { /* ignore */ } };
   let meId: string | null = readMe();
 
+  // Hand-over: the host may offer the table to a player. Accepting only sends a request; the host confirms.
+  let offer: PublicOffer | undefined;
+  const CLAIM_KEY = `viewer-claim:${code ?? ''}`;
+  const readClaim = (): string | null => { try { return sessionStorage.getItem(CLAIM_KEY); } catch { return null; } };
+  const writeClaim = (k: string | null) => { try { if (k) sessionStorage.setItem(CLAIM_KEY, k); else sessionStorage.removeItem(CLAIM_KEY); } catch { /* ignore */ } };
+  const liveOffer = () => (offer && offer.expiresAt > Date.now() ? offer : undefined);
+
+  async function acceptOffer() {
+    try {
+      const { key, hash } = await makeHostKey();
+      const res = await fetch(`/api/share?code=${code}&action=claim`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ keyHash: hash })
+      });
+      if (res.status === 200) { writeClaim(key); toast('Sent — waiting for the host to confirm'); render(); return; }
+      toast(res.status === 409 ? 'Someone else already accepted — wait for the host' : 'That offer is no longer open', 'error');
+    } catch (e) {
+      toast((e as Error).message || 'Could not reach the server', 'error');
+    }
+  }
+
+  /** After each poll: has the host confirmed (or declined) the request this tab sent? */
+  async function checkClaim() {
+    const key = readClaim();
+    if (!key || !code) return;
+    const o = liveOffer();
+    if (o && o.status === 'open') { writeClaim(null); toast('The host didn’t accept — you can try again', 'error'); render(); return; }
+    if (o) return; // still waiting for the host
+    try {
+      const res = await fetch(`/api/share?code=${code}&action=verify`, { method: 'POST', headers: { 'x-host-key': key, 'content-type': 'application/json' }, body: '{}' });
+      if (res.status === 200) {
+        // the host confirmed: finish as the new host in the full app
+        try { sessionStorage.setItem(`takeover:${code}`, key); } catch { /* ignore */ }
+        writeClaim(null);
+        history.replaceState(null, '', location.pathname);
+        location.reload();
+      } else if (res.status === 403 || res.status === 404) {
+        writeClaim(null);
+        toast('The hand-over did not happen', 'error');
+        render();
+      }
+    } catch { /* offline: next poll */ }
+  }
+
+  function offerBanner(): Node | null {
+    const o = liveOffer();
+    if (!o || o.kind !== 'seat' || !snap) return null;
+    const name = snap.players.find(p => p.id === o.playerId)?.name ?? 'a player';
+    const mine = readClaim() !== null;
+    if (o.status === 'claimed') {
+      return h('div', { class: 'offer-card', attrs: { role: 'status' } },
+        h('strong', { text: mine ? '⏳ Waiting for the host to confirm…' : `${name} accepted — waiting for the host.` }));
+    }
+    return h('div', { class: 'offer-card', attrs: { role: 'alert' } },
+      h('div', { class: 'grow' }, h('strong', { text: `🎩 The host wants to hand the table over to ${name}.` }),
+        h('div', { class: 'small muted', text: 'If that’s you, accept — the host will confirm.' })),
+      h('button', { class: 'btn primary slim', text: `I’m ${name} — accept`, on: { click: () => { void acceptOffer(); } } }));
+  }
+
   const leave = () => { history.replaceState(null, '', location.pathname); location.reload(); };
 
   function body(): Node[] {
@@ -55,6 +114,8 @@ export function mountViewer(rawCode: string) {
       h('div', { class: 'demo-card view-only' },
         h('div', { class: 'grow' }, h('strong', { text: '👀 View only' }), h('span', { class: 'small', text: ' — only the host can make changes' })))
     ];
+    const ob = offerBanner();
+    if (ob) out.push(ob);
     out.push(h('button', { class: 'btn tinted block slim', text: '🃏 New to poker? How hands rank', on: { click: openHandsSheet } }));
     out.push(h('div', { class: 'kpis' },
       kpi('Players', String(a.players.length)),
@@ -205,15 +266,16 @@ export function mountViewer(rawCode: string) {
       if (res.status === 404) { phase = 'gone'; render(); return; }
       if (res.status === 429) { throw new Error('rate'); }
       if (!res.ok) throw new Error(String(res.status));
-      const data = (await res.json()) as { unchanged?: boolean; rev: number; snapshot?: SharedSnapshot };
+      const data = (await res.json()) as { unchanged?: boolean; rev: number; snapshot?: SharedSnapshot; offer?: PublicOffer };
       failures = 0;
       const changed = (!data.unchanged && !!data.snapshot) || phase !== 'ok';
-      if (!data.unchanged && data.snapshot) { snap = data.snapshot; rev = data.rev; }
+      if (!data.unchanged && data.snapshot) { snap = data.snapshot; rev = data.rev; offer = data.offer; }
       phase = 'ok';
       updated = new Date().toTimeString().slice(0, 8);
       // Only rebuild the page when something changed, so keyboard focus and open sheets are not disturbed.
       if (changed) render();
-      else if (statusEl) { statusEl.textContent = statusText(); statusEl.className = `viewer-status ${phase}`; }
+      void checkClaim();
+      if (!changed && statusEl) { statusEl.textContent = statusText(); statusEl.className = `viewer-status ${phase}`; }
     } catch (e) {
       failures += 1;
       phase = 'offline';

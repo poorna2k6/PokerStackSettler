@@ -280,3 +280,11 @@ input::placeholder { color: var(--muted); } input:focus { outline: none; color: 
 .seat.me .avatar { box-shadow: 0 0 0 3px var(--gold, #e8c55b), 0 2px 6px rgba(0,0,0,.35); }
 .row.me { box-shadow: inset 3px 0 0 var(--gold, #e8c55b); }
 [data-theme='light'] .me-card { border-color: rgba(122,86,0,.6); }
+
+/* ---------- hand-over ---------- */
+.qr-box { background: #fff; padding: 8px; border-radius: 14px; width: min(260px, 78%); margin: 8px auto; box-shadow: 0 4px 18px rgba(0,0,0,.4); }
+.qr-box svg { display: block; width: 100%; height: auto; }
+.center { text-align: center; }
+.handover .hands-h { margin-top: 10px; }
+.offer-card { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 14px; background: linear-gradient(135deg, rgba(232,197,91,.25), rgba(232,197,91,.08)); border: 1px solid rgba(232,197,91,.6); }
+.offer-card .btn { white-space: nowrap; }

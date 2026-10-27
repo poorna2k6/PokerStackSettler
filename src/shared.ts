@@ -15,6 +15,17 @@ export interface SharedSnapshot {
 /** Share codes avoid look-alike characters (no 0/O, 1/I). 32 symbols x 8 = 40 bits. */
 export const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 export const CODE_LENGTH = 8;
+/** A pending "hand the table over" offer, as viewers may see it (never includes any secret). */
+export interface PublicOffer {
+  /** 'seat': offered to a player in the list (they accept, the host confirms). 'link': one-time QR/link for anyone. */
+  kind: 'seat' | 'link';
+  playerId?: string;
+  expiresAt: number;
+  status: 'open' | 'claimed';
+}
+export const OFFER_TTL_MS = 10 * 60 * 1000;
+export const KEY_HASH_RE = /^[a-f0-9]{64}$/;
+
 export const SHARE_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 export function normalizeCode(raw: unknown): string | null {

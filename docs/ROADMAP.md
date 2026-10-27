@@ -2,7 +2,8 @@
 
 Shipped recently: live view-only sharing, shared link opens on the oval table, hand-ranking cheat sheet
 (host app + shared link), "That's me" highlight with "you pay / you receive", standings strip, save the
-settlement as a picture.
+settlement as a picture, and **handing the table to another host** (QR/one-time link for anyone, or request to a
+player in the list that the host confirms).
 
 ## Deliberately skipped for now
 - **Payment deep links** (Venmo / Zelle / Cash App / UPI / PayPal.me): after settle, each payer gets a tap-to-pay
@@ -27,7 +28,9 @@ settlement as a picture.
 - **Chip-count helper:** tap chip denominations to total a stack instead of typing it.
 - **Undo and audit log:** every buy-in/chip change with a timestamp, for settling disputes.
 - **Photo of a stack** attached to a cash-out (opt-in, on-device by default; camera data is sensitive).
-- **Co-host:** a second key that can also edit (host-only today).
+- **Co-host:** a second key that can also edit at the same time (today the role *moves*; it is never shared). Needs conflict handling when two people change the same player.
+- **Recovery key:** copy a backup of the host key so a *lost* phone (no chance to hand over) can be recovered.
+- **Host-offline notice on the shared link:** "Host last updated 7 min ago" and a gentle warning after ~10 min.
 - **Export:** CSV / PDF season report and monthly summary.
 - **Languages and currency symbol.**
 - **"Which hand wins?" mini quiz** built on the hand-ranking data.
