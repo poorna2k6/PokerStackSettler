@@ -222,7 +222,7 @@ function openShareSheet() {
       if (statusEl) statusEl.textContent = shareStatus();
     });
 
-    const draw = () => {
+    let draw = () => {
       const share = state.session.share;
       if (!share) {
         const start = h('button', { class: 'btn primary block', text: 'Start sharing', on: { click: async () => {
@@ -263,6 +263,8 @@ function openShareSheet() {
           onConfirm: async () => { const ok = await stopSharing(); toast(ok ? 'Sharing stopped' : 'Sharing stopped here — the link will expire on its own', ok ? 'ok' : 'error'); }
         }); } } }));
     };
+    const redraw = draw;
+    draw = () => { redraw(); (body.querySelector('input, button.primary') as HTMLElement | null)?.focus(); };
     draw();
     return body;
   });

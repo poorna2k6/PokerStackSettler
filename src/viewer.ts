@@ -30,10 +30,10 @@ export function mountViewer(rawCode: string) {
 
   function body(): Node[] {
     if (phase === 'invalid') {
-      return [group(h('div', { class: 'row empty' }, h('span', { text: 'That live-game code isn’t valid. Ask the host for the link again.' })))];
+      return [group(h('div', { class: 'row empty', attrs: { role: 'alert' } }, h('span', { text: 'That live-game code isn’t valid. Ask the host for the link again.' })))];
     }
     if (phase === 'gone') {
-      return [group(h('div', { class: 'row empty' }, h('span', { text: 'This live game isn’t available any more — it expired or the host stopped sharing.' })))];
+      return [group(h('div', { class: 'row empty', attrs: { role: 'alert' } }, h('span', { text: 'This live game isn’t available any more — it expired or the host stopped sharing.' })))];
     }
     if (!snap) {
       return [group(h('div', { class: 'row empty' }, h('span', { text: phase === 'offline' ? 'Can’t reach the server — retrying…' : 'Loading the table…' })))];
@@ -87,6 +87,7 @@ export function mountViewer(rawCode: string) {
 
   function render() {
     const status =
+      phase === 'invalid' ? 'Invalid code' :
       phase === 'ok' ? `● Live · updated ${updated}` :
       phase === 'offline' ? '○ Reconnecting…' :
       phase === 'gone' ? 'Stopped' : '';
@@ -94,10 +95,10 @@ export function mountViewer(rawCode: string) {
     app.replaceChildren(
       h('main', { class: 'scroll' },
         h('div', { class: 'large-title' }, h('h1', { text: 'Live table' }), pill),
-        h('div', { class: 'subtitle', text: snap?.name ?? (code ? `Code ${formatCode(code)}` : '') }),
+        h('div', { class: 'subtitle wrap', text: snap?.name ?? (code ? `Code ${formatCode(code)}` : '') }),
         h('div', { class: 'view' }, ...body())),
       h('nav', { class: 'tabbar viewer-bar', attrs: { 'aria-label': 'Live view' } },
-        h('span', { class: 'viewer-status', text: status, attrs: { role: 'status', 'aria-live': 'polite' } }),
+        h('span', { class: `viewer-status ${phase}`, text: status, attrs: { role: 'status', 'aria-live': 'polite' } }),
         h('button', { class: 'link', text: 'Leave', attrs: { 'aria-label': 'Leave live view' }, on: { click: leave } })));
   }
 

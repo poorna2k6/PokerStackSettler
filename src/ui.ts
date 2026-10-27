@@ -3,7 +3,7 @@ import { h } from './dom';
 
 export const group = (...rows: (Node | null | false)[]) => h('div', { class: 'group' }, ...rows);
 export const header = (title: string, caption?: string) =>
-  h('div', { class: 'section-title' }, h('span', { text: title }), caption ? h('span', { class: 'muted', text: caption }) : null);
+  h('div', { class: 'section-title', attrs: { role: 'heading', 'aria-level': 2 } }, h('span', { text: title }), caption ? h('span', { class: 'muted', text: caption }) : null);
 
 export function kpi(label: string, value: string, sub?: string, tone = '') {
   return h('div', { class: `kpi ${tone}` },

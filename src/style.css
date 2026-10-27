@@ -219,3 +219,8 @@ input::placeholder { color: var(--muted); } input:focus { outline: none; color: 
   .player-top .net { font-size: 14px; }
   .player-name { flex: 1 1 56px; }
 }
+
+.view-row .player-name-text { white-space: normal; overflow-wrap: anywhere; }
+.subtitle.wrap { white-space: normal; overflow-wrap: anywhere; }
+.viewer-bar button.link { min-height: 44px; min-width: 72px; padding: 0 6px; }
+.viewer-status.ok { color: var(--good); }
