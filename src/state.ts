@@ -1,15 +1,16 @@
 import {
-  buildNotepad, parseBackup, reconcile, sanitizeBuyIn, solve, toCents,
+  buildNotepad, parseBackup, parseBuyInUnit, reconcile, solve, toCents,
   type Player, type ReconcileMode, type SavedSession, type SessionData
 } from './engine';
 import { PRESETS, type Preset } from './presets';
-import { loadLive, loadTheme, loadVault, saveLive, saveTheme, saveVault, type Theme } from './storage';
+import { loadLive, loadPrefs, loadTheme, loadVault, savePrefs, saveLive, saveTheme, saveVault, type Prefs, type Theme } from './storage';
 
 export type Tab = 'table' | 'settle' | 'history' | 'settings';
 
 export interface State {
   tab: Tab;
   theme: Theme;
+  prefs: Prefs;
   session: SessionData;
   saved: SavedSession[];
   /** false when the browser refused to persist (private mode, quota, blocked storage) */
@@ -27,6 +28,7 @@ function fromPreset(p: Preset): SessionData {
     defaultBuyIn: p.defaultBuyIn,
     expenseCents: p.expenseCents,
     isEnded: false,
+    isDemo: true,
     players: p.players.map(x => ({ ...x, id: uid('p') })),
     paid: {}
   };
@@ -35,11 +37,14 @@ function fromPreset(p: Preset): SessionData {
 export const state: State = {
   tab: 'table',
   theme: loadTheme(),
+  prefs: loadPrefs(),
   session: loadLive() ?? fromPreset(PRESETS[0]),
   saved: loadVault(),
   storageOk: true,
   lastSave: ''
 };
+// Probe storage once at startup so a blocked browser is flagged before the first edit.
+state.storageOk = saveLive(state.session);
 
 type Listener = () => void;
 const listeners: Listener[] = [];
@@ -55,13 +60,25 @@ export function commit() {
 }
 
 export const audit = () => solve(state.session.players, state.session.expenseCents, state.session.defaultBuyIn);
-export const paidKey = (id: string, cents: number) => `${id}:${cents}`;
+export { paidKey } from './engine';
 
 export function setTab(tab: Tab) { state.tab = tab; listeners.forEach(fn => fn()); }
 export function setTheme(theme: Theme) { state.theme = theme; state.storageOk = saveTheme(theme) && state.storageOk; listeners.forEach(fn => fn()); }
 
+export function setPrefs(patch: Partial<Prefs>) {
+  state.prefs = { ...state.prefs, ...patch };
+  state.storageOk = savePrefs(state.prefs) && state.storageOk;
+  listeners.forEach(fn => fn());
+}
+
 export function setName(name: string) { state.session.name = name.trim().slice(0, 80) || 'Poker Session'; commit(); }
-export function setUnit(v: string) { state.session.defaultBuyIn = sanitizeBuyIn(parseFloat(v)); commit(); }
+/** Returns false (and keeps the old unit) when the value is invalid. */
+export function setUnit(v: string): boolean {
+  const n = parseBuyInUnit(v);
+  if (n !== null) state.session.defaultBuyIn = n;
+  commit();
+  return n !== null;
+}
 export function setExpense(v: string) { state.session.expenseCents = Math.max(0, toCents(v)); commit(); }
 
 export function addPlayer(name: string, buyIns: number) {
@@ -92,6 +109,12 @@ export function applyReconcile(mode: ReconcileMode) {
 
 export function togglePaid(key: string) {
   if (state.session.paid[key]) delete state.session.paid[key]; else state.session.paid[key] = true;
+  // keep the History copy of this session in step, so reopening it later shows the same paid marks
+  const saved = state.saved.find(x => x.id === state.session.id);
+  if (saved && !state.session.isDemo) {
+    saved.paid = { ...state.session.paid };
+    state.storageOk = saveVault(state.saved) && state.storageOk;
+  }
   commit();
 }
 
@@ -100,11 +123,14 @@ function snapshot(status: string): SavedSession {
   return {
     id: s.id, name: s.name, timestamp: stamp(), status,
     defaultBuyIn: s.defaultBuyIn, expenseCents: s.expenseCents,
-    players: s.players.map(p => ({ ...p }))
+    players: s.players.map(p => ({ ...p })),
+    paid: { ...s.paid }
   };
 }
 
-export function saveToHistory(status = 'Saved Snapshot') {
+/** Demo sessions are never written to History. Returns null in that case. */
+export function saveToHistory(status = 'Saved Snapshot'): SavedSession | null {
+  if (state.session.isDemo) return null;
   const snap = snapshot(status);
   const i = state.saved.findIndex(x => x.id === snap.id);
   if (i >= 0) state.saved[i] = snap; else state.saved.unshift(snap);
@@ -113,17 +139,28 @@ export function saveToHistory(status = 'Saved Snapshot') {
   return snap;
 }
 
-/** Locks the session; when chips don't match, balances them pro-rata first. */
-export function endSession() {
-  if (!audit().isBalanced) applyReconcile('proRataWinners');
+/**
+ * Locks the session; when chips don't match, balances them pro-rata first.
+ * Returns false (and leaves the session open) if the table cannot be balanced,
+ * e.g. the expense pot is larger than everything that was bought in.
+ */
+export function endSession(): boolean {
+  if (!audit().isBalanced) {
+    const s = state.session;
+    const fixed = reconcile(s.players, s.expenseCents, 'proRataWinners', s.defaultBuyIn);
+    // Only keep the adjustment if it actually balances; a refusal must not alter what the user typed.
+    if (!solve(fixed, s.expenseCents, s.defaultBuyIn).isBalanced) return false;
+    s.players = fixed;
+  }
   state.session.isEnded = true;
-  saveToHistory('Completed & Settled');
+  if (state.session.isDemo) commit(); else saveToHistory('Completed & Settled');
+  return true;
 }
 export function reopenSession() { state.session.isEnded = false; commit(); }
 
 export function newSession(p?: Preset) {
   state.session = p ? fromPreset(p) : {
-    id: uid('sess'), name: 'New Poker Session', defaultBuyIn: 100, expenseCents: 0, isEnded: false, players: [], paid: {}
+    id: uid('sess'), name: 'New Poker Session', defaultBuyIn: 100, expenseCents: 0, isEnded: false, isDemo: false, players: [], paid: {}
   };
   state.tab = 'table';
   commit();
@@ -134,7 +171,7 @@ export function loadSaved(id: string) {
   if (!s) return;
   state.session = {
     id: s.id, name: s.name, defaultBuyIn: s.defaultBuyIn, expenseCents: s.expenseCents,
-    isEnded: s.status.startsWith('Completed'), players: s.players.map(p => ({ ...p })), paid: {}
+    isEnded: s.status.startsWith('Completed'), isDemo: false, players: s.players.map(p => ({ ...p })), paid: { ...(s.paid ?? {}) }
   };
   state.tab = 'table';
   commit();
@@ -165,12 +202,12 @@ export function importBackup(text: string): string | null {
     state.saved = [...added, ...state.saved];
     state.storageOk = saveVault(state.saved) && state.storageOk;
     commit();
-    return `Imported ${added.length} session${added.length === 1 ? '' : 's'}`;
+    return added.length === 0 ? 'Those sessions are already in History' : `Imported ${added.length} session${added.length === 1 ? '' : 's'}`;
   }
   const s = parsed.session;
   state.session = {
     id: s.id, name: s.name, defaultBuyIn: s.defaultBuyIn, expenseCents: s.expenseCents,
-    isEnded: false, players: s.players, paid: {}
+    isEnded: false, isDemo: false, players: s.players, paid: {}
   };
   state.tab = 'table';
   commit();

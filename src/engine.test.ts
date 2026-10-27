@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  buildNotepad, leaderboard, parseBackup, reconcile, sanitizePlayers, settleNodes, solve,
-  toCents, type Player
+  buildNotepad, buildReceipt, buyInCount, paidKey, uniqueSessionIds, formatUnit, leaderboard, parseBuyInUnit, sanitizeBuyIn, parseBackup, reconcile, sanitizePlayers, settleNodes, solve,
+  formatCurrency, toCents, type Player
 } from './engine';
 
 const P = (id: string, bi: number, co: number): Player => ({ id, name: id, buyInCents: bi, cashOutCents: co });
@@ -40,6 +40,53 @@ describe('toCents', () => {
     expect(toCents('abc')).toBe(0);
     expect(toCents(Infinity)).toBe(0);
     expect(toCents(0)).toBe(0);
+    expect(toCents(undefined)).toBe(0);
+  });
+
+  it('rounds half-up on the decimal string, not on binary floats', () => {
+    expect(toCents('1.005')).toBe(101);
+    expect(toCents('0.285')).toBe(29);
+    expect(toCents(1.005)).toBe(101);
+    expect(toCents('61.75')).toBe(6175);
+    expect(toCents('0.1') + toCents('0.2')).toBe(30);
+  });
+
+  it('tolerates $ , and spaces; rejects junk', () => {
+    expect(toCents('$1,000.50')).toBe(100050);
+    expect(toCents(' $20 ')).toBe(2000);
+    expect(toCents('.5')).toBe(50);
+    expect(toCents('5.')).toBe(500);
+    expect(toCents('-5')).toBe(-500);
+    expect(toCents('1e3')).toBe(0);
+    expect(toCents('1.2.3')).toBe(0);
+    expect(toCents('')).toBe(0);
+    expect(toCents('.')).toBe(0);
+    expect(toCents('9'.repeat(40))).toBe(0);
+  });
+});
+
+describe('buy-in unit', () => {
+  it('accepts $0.01 to $100,000 and rounds to cents', () => {
+    expect(parseBuyInUnit('0.5')).toBe(0.5);
+    expect(parseBuyInUnit('25.555')).toBe(25.56);
+    expect(parseBuyInUnit('100000')).toBe(100000);
+    expect(parseBuyInUnit('0')).toBeNull();
+    expect(parseBuyInUnit('abc')).toBeNull();
+    expect(parseBuyInUnit('100001')).toBeNull();
+    expect(sanitizeBuyIn('nope')).toBe(100);
+  });
+
+  it('counts buy-ins correctly for sub-dollar units', () => {
+    expect(buyInCount(250, 0.5)).toBe(5);
+  });
+
+  it('formats units', () => {
+    expect(formatUnit(100)).toBe('$100');
+    expect(formatUnit(1.5)).toBe('$1.50');
+    expect(formatUnit(0.25)).toBe('$0.25');
+    expect(formatUnit(1000)).toBe('$1,000');
+    expect(formatUnit(1500.5)).toBe('$1,500.50');
+    expect(buildNotepad({ id: 'x', name: 'n', defaultBuyIn: 1500.5, expenseCents: 0, isEnded: false, paid: {}, players: [P('a', 1, 1)] })).toContain('Unit  : $1,500.50');
   });
 });
 
@@ -195,5 +242,45 @@ describe('leaderboard', () => {
     ]);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ sessions: 2, netCents: 100 });
+  });
+});
+
+describe('receipt and import regressions', () => {
+  it('receipt marks paid transfers using the same key the UI stores', () => {
+    const audit = solve([P('a', 10000, 15000), P('b', 10000, 5000)]);
+    const t = audit.transfers[0];
+    const text = buildReceipt('G', audit, { [paidKey(t.id, t.amountCents)]: true });
+    expect(text).toContain('✅');
+    expect(buildReceipt('G', audit, {})).not.toContain('✅');
+  });
+
+  it('makes duplicate session ids unique so open/delete are unambiguous', () => {
+    const mk = (name: string) => ({ id: 'dup', name, timestamp: '', status: '', defaultBuyIn: 100, expenseCents: 0, players: [P('a', 1, 1)] });
+    const ids = uniqueSessionIds([mk('1'), mk('2'), mk('3')]).map(s => s.id);
+    expect(new Set(ids).size).toBe(3);
+    const parsed = parseBackup(JSON.stringify([mk('1'), mk('2')]));
+    expect(parsed?.kind === 'vault' && new Set(parsed.sessions.map(s => s.id)).size).toBe(2);
+  });
+
+  it('non-string player names become "Player", not [object Object]', () => {
+    expect(sanitizePlayers([{ id: 'x', name: { a: 1 }, buyInCents: 1, cashOutCents: 1 }])[0].name).toBe('Player');
+  });
+});
+
+describe('formatCurrency', () => {
+  it('groups thousands and signs', () => {
+    expect(formatCurrency(110000)).toBe('$1,100.00');
+    expect(formatCurrency(-123456789, true)).toBe('-$1,234,567.89');
+    expect(formatCurrency(5, true)).toBe('+$0.05');
+    expect(formatCurrency(0)).toBe('$0.00');
+    expect(toCents(formatCurrency(123456))).toBe(123456);
+  });
+});
+
+describe('saved session paid marks', () => {
+  it('keeps only true paid flags and survives a backup round trip', () => {
+    const raw = { id: 's', name: 'G', players: [{ id: 'a', name: 'a', buyInCents: 1, cashOutCents: 1 }], paid: { 'a->b:100': true, 'x': false, 'y': 'yes' } };
+    const parsed = parseBackup(JSON.stringify([raw]));
+    expect(parsed?.kind === 'vault' && parsed.sessions[0].paid).toEqual({ 'a->b:100': true });
   });
 });

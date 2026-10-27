@@ -34,6 +34,9 @@ export interface Audit {
   transfers: Transfer[];
 }
 
+/** Key under which a transfer's paid state is stored (amount included, so edits reset it). */
+export const paidKey = (id: string, cents: number) => `${id}:${cents}`;
+
 export type ReconcileMode = 'proRataWinners' | 'equalSplit' | 'topWinner';
 
 export const HOUSE_ID = '__house_expense__';
@@ -41,18 +44,37 @@ export const MAX_NAME = 40;
 /** Largest participant count for which the provably minimal transfer search runs. */
 const EXACT_LIMIT = 16;
 
+/**
+ * Parses a money value to integer cents, rounding half-up on the decimal digits
+ * (so 1.005 → 101, not 100 via binary floating point). Tolerates `$`, commas and
+ * spaces; anything that isn't a plain decimal number (letters, 1e3, …) is 0.
+ */
 export function toCents(val: unknown): number {
-  const num = typeof val === 'number' ? val : parseFloat(String(val ?? ''));
-  return Number.isFinite(num) ? Math.round(num * 100) : 0;
+  const str = typeof val === 'number' ? (Number.isFinite(val) ? String(val) : '') : String(val ?? '');
+  const m = /^(-?)(\d*)(?:\.(\d*))?$/.exec(str.replace(/[$,\s]/g, ''));
+  if (!m || (m[2] === '' && !m[3])) return 0;
+  const whole = Number(m[2] || '0');
+  const frac = (m[3] ?? '').padEnd(3, '0');
+  let cents = whole * 100 + Number(frac.slice(0, 2)) + (Number(frac[2]) >= 5 ? 1 : 0);
+  if (!Number.isFinite(cents) || cents > Number.MAX_SAFE_INTEGER) return 0;
+  if (m[1]) cents = -cents;
+  return cents === 0 ? 0 : cents;
+}
+
+/** "$100", "$1.50", "$0.25" */
+export function formatUnit(dollars: number): string {
+  const digits = Number.isInteger(dollars) ? 0 : 2;
+  return `$${dollars.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
 }
 
 export function formatCurrency(cents: number, showSign = false): string {
   const sign = cents < 0 ? '-' : showSign && cents > 0 ? '+' : '';
-  return `${sign}$${(Math.abs(cents) / 100).toFixed(2)}`;
+  const abs = (Math.abs(cents) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return `${sign}$${abs}`;
 }
 
 export function unitCentsFor(stdBuyInDollars: number): number {
-  return Math.max(100, toCents(stdBuyInDollars || 100));
+  return Math.max(1, toCents(stdBuyInDollars || 100));
 }
 
 export function buyInCount(buyInCents: number, stdBuyInDollars: number): number {
@@ -64,7 +86,7 @@ export function formatBuyInCount(count: number): string {
 }
 
 function cleanName(name: unknown): string {
-  const s = String(name ?? '').trim().slice(0, MAX_NAME);
+  const s = (typeof name === 'string' || typeof name === 'number' ? String(name) : '').trim().slice(0, MAX_NAME);
   return s || 'Player';
 }
 
@@ -309,6 +331,8 @@ export interface SessionData {
   defaultBuyIn: number;
   expenseCents: number;
   isEnded: boolean;
+  /** true while showing built-in demo data; demo sessions are never saved to History */
+  isDemo?: boolean;
   players: Player[];
   paid: Record<string, boolean>;
 }
@@ -321,11 +345,32 @@ export interface SavedSession {
   defaultBuyIn: number;
   expenseCents: number;
   players: Player[];
+  /** paid-transfer marks, so a settled game reopened from History keeps them */
+  paid?: Record<string, boolean>;
+}
+
+export const MIN_UNIT = 0.01;
+export const MAX_UNIT = 100000;
+
+/** Returns the unit rounded to cents, or null when it is out of range / not a number. */
+export function parseBuyInUnit(v: unknown): number | null {
+  const cents = toCents(v);
+  const n = cents / 100;
+  return n >= MIN_UNIT && n <= MAX_UNIT ? n : null;
 }
 
 export function sanitizeBuyIn(v: unknown): number {
-  const n = Number(v);
-  return Number.isFinite(n) && n >= 1 && n <= 100000 ? n : 100;
+  return parseBuyInUnit(v) ?? 100;
+}
+
+export function sanitizePaid(raw: unknown): Record<string, boolean> {
+  const out: Record<string, boolean> = {};
+  if (raw && typeof raw === 'object') {
+    for (const [k, v] of Object.entries(raw as Record<string, unknown>).slice(0, 400)) {
+      if (v === true && k.length <= 200) out[k] = true;
+    }
+  }
+  return out;
 }
 
 export function sanitizeSaved(raw: unknown): SavedSession | null {
@@ -340,8 +385,20 @@ export function sanitizeSaved(raw: unknown): SavedSession | null {
     status: String(o.status ?? 'Saved Snapshot').slice(0, 40),
     defaultBuyIn: sanitizeBuyIn(o.defaultBuyIn),
     expenseCents: safeCents(o.expenseCents),
-    players
+    players,
+    paid: sanitizePaid(o.paid)
   };
+}
+
+/** Makes session ids unique within one list, so open/delete always target a single entry. */
+export function uniqueSessionIds(list: SavedSession[]): SavedSession[] {
+  const seen = new Set<string>();
+  return list.map(s => {
+    let id = s.id;
+    while (seen.has(id)) id += '_';
+    seen.add(id);
+    return id === s.id ? s : { ...s, id };
+  });
 }
 
 export type ParsedBackup =
@@ -360,7 +417,7 @@ export function parseBackup(text: string): ParsedBackup | null {
     return null;
   }
   if (Array.isArray(data)) {
-    const sessions = data.map(sanitizeSaved).filter((s): s is SavedSession => s !== null);
+    const sessions = uniqueSessionIds(data.map(sanitizeSaved).filter((s): s is SavedSession => s !== null));
     return sessions.length ? { kind: 'vault', sessions } : null;
   }
   const session = sanitizeSaved(data);
@@ -372,7 +429,8 @@ export function buildNotepad(s: SavedSession | (SessionData & { timestamp?: stri
   const audit = solve(s.players, expense, s.defaultBuyIn);
   const stamp =
     ('timestamp' in s && s.timestamp) || new Date().toISOString().slice(0, 16).replace('T', ' ');
-  const status = ('status' in s && s.status) || 'Live Auto-Saved';
+  const status =
+    ('status' in s && s.status) || ('isEnded' in s && s.isEnded ? 'Completed & Settled' : 'Live Auto-Saved');
   const bar = '='.repeat(64);
   const dash = '-'.repeat(64);
 
@@ -383,7 +441,8 @@ export function buildNotepad(s: SavedSession | (SessionData & { timestamp?: stri
     `Session Name   : ${s.name || 'Poker Cash Game'}`,
     `Saved Timestamp: ${stamp}`,
     `Session Status : ${status}`,
-    `1 Buy-In Unit  : $${s.defaultBuyIn}`,
+    `1 Buy-In Unit  : ${formatUnit(s.defaultBuyIn)}`,
+    ...(audit.expenseCents > 0 ? [`Rake / Expense: ${formatCurrency(audit.expenseCents)} (paid to House / Expense Pot)`] : []),
     `Total Table Pot: ${formatCurrency(audit.totalBuyInCents)} (${formatBuyInCount(audit.totalBuyInCount)} across ${audit.players.length} players)`,
     `Table Balance  : ${audit.isBalanced ? 'BALANCED' : 'DISCREPANCY ' + formatCurrency(audit.discrepancyCents, true)}`,
     dash,
@@ -427,7 +486,7 @@ export function buildReceipt(
   const lines = [`♠️ ${name} — Final Settlement`, ''];
   if (audit.transfers.length === 0) lines.push('No payments needed.');
   audit.transfers.forEach(t =>
-    lines.push(`${paid[t.id] ? '✅' : '⬜'} ${t.fromName} ➡️ ${t.toName}: ${formatCurrency(t.amountCents)}`)
+    lines.push(`${paid[paidKey(t.id, t.amountCents)] ? '✅' : '⬜'} ${t.fromName} ➡️ ${t.toName}: ${formatCurrency(t.amountCents)}`)
   );
   lines.push('', 'Results:');
   [...audit.players]

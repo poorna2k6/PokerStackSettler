@@ -19,7 +19,10 @@ export function h<K extends keyof HTMLElementTagNameMap>(
   if (props?.text !== undefined) el.textContent = props.text;
   if (props?.attrs) {
     for (const [k, v] of Object.entries(props.attrs)) {
-      if (v === undefined || v === false) continue;
+      if (v === undefined) continue;
+      // aria-* states need explicit "true"/"false"; other boolean attrs (disabled, hidden) are presence-only.
+      if (typeof v === 'boolean' && k.startsWith('aria-')) { el.setAttribute(k, String(v)); continue; }
+      if (v === false) continue;
       el.setAttribute(k, v === true ? '' : String(v));
     }
   }
@@ -48,16 +51,40 @@ export function toast(message: string, kind: 'ok' | 'error' = 'ok') {
 
 export interface SheetHandle { close(): void }
 
+/** Called when a sheet closes and the control that opened it no longer exists (the screen was re-rendered). */
+let focusFallback: (() => void) | undefined;
+export const setFocusFallback = (fn: () => void) => { focusFallback = fn; };
+
 /** Bottom sheet. `build` receives a close function and returns the body. */
 export function openSheet(title: string, build: (close: () => void) => Node): SheetHandle {
   const root = document.getElementById('sheets')!;
   const previous = document.activeElement as HTMLElement | null;
   const backdrop = h('div', { class: 'backdrop' });
   const sheet = h('div', { class: 'sheet', attrs: { role: 'dialog', 'aria-modal': 'true', 'aria-label': title } });
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') { close(); return; }
+    // Keep Tab focus inside the topmost sheet.
+    if (e.key !== 'Tab' || root.lastElementChild !== sheet) return;
+    const items = [...sheet.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])')];
+    if (items.length === 0) return;
+    const first = items[0];
+    const last = items[items.length - 1];
+    const active = document.activeElement as HTMLElement | null;
+    if (e.shiftKey && (active === first || !sheet.contains(active))) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && (active === last || !sheet.contains(active))) { e.preventDefault(); first.focus(); }
+  };
   const close = () => {
+    document.removeEventListener('keydown', onKey);
     sheet.classList.remove('in');
     backdrop.classList.remove('in');
-    setTimeout(() => { sheet.remove(); backdrop.remove(); previous?.focus?.(); }, 220);
+    setTimeout(() => {
+      sheet.remove();
+      backdrop.remove();
+      // Hand focus back only when no other sheet took over (e.g. confirm -> rename sheet).
+      if (root.querySelector('.sheet')) return;
+      if (previous?.isConnected) previous.focus();
+      else focusFallback?.();
+    }, 220);
   };
   sheet.append(
     h('div', { class: 'sheet-grabber' }),
@@ -67,7 +94,7 @@ export function openSheet(title: string, build: (close: () => void) => Node): Sh
     build(close)
   );
   backdrop.addEventListener('click', close);
-  sheet.addEventListener('keydown', e => { if (e.key === 'Escape') close(); });
+  document.addEventListener('keydown', onKey);
   root.append(backdrop, sheet);
   requestAnimationFrame(() => { sheet.classList.add('in'); backdrop.classList.add('in'); });
   (sheet.querySelector('input,button.primary') as HTMLElement | null)?.focus();

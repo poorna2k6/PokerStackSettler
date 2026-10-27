@@ -1,4 +1,4 @@
-import { sanitizeBuyIn, sanitizePlayers, sanitizeSaved, toCents, type SavedSession, type SessionData } from './engine';
+import { sanitizeBuyIn, sanitizePaid, sanitizePlayers, sanitizeSaved, toCents, uniqueSessionIds, type SavedSession, type SessionData } from './engine';
 
 const VAULT_KEY = 'stacksettle_pro_vault_v2';
 const LIVE_KEY = 'stacksettle_live_autosave_v1';
@@ -30,7 +30,7 @@ export function loadTheme(): Theme {
     const t = localStorage.getItem(THEME_KEY) as Theme | null;
     if (t && (THEMES as readonly string[]).includes(t)) return t;
   } catch { /* ignore */ }
-  return 'midnight';
+  return 'felt';
 }
 export const saveTheme = (t: Theme) => write(THEME_KEY, t);
 
@@ -42,16 +42,14 @@ export function loadLive(): SessionData | null {
   if (players.length === 0) return null;
   const legacyExpense = o.expenseDollars !== undefined ? toCents(o.expenseDollars) : 0;
   const expenseCents = o.expenseCents !== undefined ? Math.max(0, Math.round(Number(o.expenseCents)) || 0) : legacyExpense;
-  const paid: Record<string, boolean> = {};
-  if (o.paid && typeof o.paid === 'object') {
-    for (const [k, v] of Object.entries(o.paid as Record<string, unknown>)) if (v === true) paid[k] = true;
-  }
+  const paid = sanitizePaid(o.paid);
   return {
     id: typeof o.sessionId === 'string' ? o.sessionId : typeof o.id === 'string' ? o.id : 'sess_live',
     name: String(o.sessionName ?? o.name ?? 'Poker Session').slice(0, 80),
     defaultBuyIn: sanitizeBuyIn(o.defaultBuyIn),
     expenseCents,
     isEnded: o.isEnded === true,
+    isDemo: o.isDemo === true,
     players,
     paid
   };
@@ -60,12 +58,21 @@ export function loadLive(): SessionData | null {
 export const saveLive = (s: SessionData) =>
   write(LIVE_KEY, {
     id: s.id, name: s.name, defaultBuyIn: s.defaultBuyIn, expenseCents: s.expenseCents,
-    isEnded: s.isEnded, players: s.players, paid: s.paid
+    isEnded: s.isEnded, isDemo: s.isDemo === true, players: s.players, paid: s.paid
   });
 
 export function loadVault(): SavedSession[] {
   const raw = read(VAULT_KEY);
   if (!Array.isArray(raw)) return [];
-  return raw.map(sanitizeSaved).filter((s): s is SavedSession => s !== null);
+  return uniqueSessionIds(raw.map(sanitizeSaved).filter((s): s is SavedSession => s !== null));
 }
 export const saveVault = (v: SavedSession[]) => write(VAULT_KEY, v);
+
+export interface Prefs { sound: boolean; view: 'list' | 'table' }
+const PREFS_KEY = 'stacksettle_prefs_v1';
+
+export function loadPrefs(): Prefs {
+  const o = read(PREFS_KEY) as Partial<Prefs> | null;
+  return { sound: o?.sound === true, view: o?.view === 'table' ? 'table' : 'list' };
+}
+export const savePrefs = (p: Prefs) => write(PREFS_KEY, p);
