@@ -73,14 +73,16 @@ function startFresh() {
   openAddPlayer();
 }
 
+const LINK_NOTE = '\n\nThis also stops your live view-only link.';
+
 function requestNew() {
   const s = state.session;
-  if (s.isDemo || s.players.length === 0) { startFresh(); return; }
+  if ((s.isDemo || s.players.length === 0) && !s.share) { startFresh(); return; }
   confirmSheet({
     title: 'Start a new session?',
     message: s.isEnded
-      ? 'The current settled session stays in History.'
-      : 'The current table will be replaced. Save it to History first if you need it.',
+      ? `The current settled session stays in History.${s.share ? LINK_NOTE : ''}`
+      : `The current table will be replaced. Save it to History first if you need it.${s.share ? LINK_NOTE : ''}`,
     confirmLabel: 'Start new session', destructive: !s.isEnded, onConfirm: startFresh
   });
 }
@@ -536,7 +538,15 @@ function historyView(): HTMLElement {
 function openSavedActions(s: SavedSession) {
   openSheet(s.name, close => h('div', { class: 'sheet-body' },
     h('p', { class: 'muted', text: `${s.timestamp} · ${s.players.length} players · ${s.status}` }),
-    h('button', { class: 'btn primary block', text: 'Open on Table', on: { click: () => { close(); loadSaved(s.id); } } }),
+    h('button', { class: 'btn primary block', text: 'Open on Table', on: { click: () => {
+      close();
+      if (!state.session.share) { loadSaved(s.id); return; }
+      confirmSheet({
+        title: 'Replace the current table?',
+        message: `The table you have open will be replaced.${LINK_NOTE}`,
+        confirmLabel: 'Open and stop link', destructive: true, onConfirm: () => loadSaved(s.id)
+      });
+    } } }),
     h('button', { class: 'btn tinted block', text: 'Download .txt', on: { click: () => { close(); download(`${safeFile(s.name)}_notepad.txt`, sessionText(s)); } } }),
     h('button', { class: 'btn danger block', text: 'Delete', on: { click: () => { close(); confirmSheet({
       title: `Delete “${s.name}”?`, message: 'This cannot be undone.', confirmLabel: 'Delete', destructive: true, onConfirm: () => deleteSaved(s.id) }); } } })));
@@ -585,10 +595,10 @@ function settingsView(): HTMLElement {
         toast(msg ?? 'That file is not a StackSettle backup', msg ? 'ok' : 'error');
       };
       const parsed = parseBackup(text);
-      if (parsed?.kind === 'session' && !state.session.isDemo && state.session.players.length > 0) {
+      if (parsed?.kind === 'session' && ((!state.session.isDemo && state.session.players.length > 0) || state.session.share)) {
         confirmSheet({
           title: 'Replace the current table?',
-          message: `Restoring “${parsed.session.name}” will replace the table you have open. Save it to History first if you need it.`,
+          message: `Restoring “${parsed.session.name}” will replace the table you have open. Save it to History first if you need it.${state.session.share ? LINK_NOTE : ''}`,
           confirmLabel: 'Restore', destructive: true, onConfirm: apply
         });
       } else apply();
@@ -611,10 +621,10 @@ function settingsView(): HTMLElement {
 
 function confirmNew(go: () => void) {
   const s = state.session;
-  if (s.isDemo || s.players.length === 0) { go(); return; }
+  if ((s.isDemo || s.players.length === 0) && !s.share) { go(); return; }
   confirmSheet({
     title: 'Replace the current table?',
-    message: 'The current table will be replaced. Save it to History first if you need it.',
+    message: `The current table will be replaced. Save it to History first if you need it.${s.share ? LINK_NOTE : ''}`,
     confirmLabel: 'Load demo', destructive: true, onConfirm: go
   });
 }
