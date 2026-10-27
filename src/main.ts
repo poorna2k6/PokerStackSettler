@@ -165,6 +165,7 @@ function tableView(): HTMLElement {
       attrs: { disabled: s.players.length < 2 && !locked },
       on: { click: locked ? () => setTab('settle') : requestEnd }
     }),
+    ...(s.players.length < 2 && !locked ? [h('div', { class: 'foot', text: 'Add at least 2 players to settle' })] : []),
     h('div', { class: 'foot' }, storageNote())
   );
   return view;
@@ -315,6 +316,7 @@ function finishSession() {
 
 function requestEnd() {
   const a = audit();
+  if (a.players.length < 2) { toast('Add at least 2 players to settle', 'error'); return; }
   if (!a.isBalanced) {
     confirmSheet({
       title: `Chips are off by ${formatCurrency(a.discrepancyCents, true)}`,
@@ -325,7 +327,7 @@ function requestEnd() {
   }
   confirmSheet({
     title: 'End & settle?',
-    message: `${a.players.length} players · ${formatCurrency(a.totalBuyInCents)} pot · ${a.transfers.length} transfer${a.transfers.length === 1 ? '' : 's'}.\n\nThe session will be saved to History and locked.`,
+    message: `${a.players.length} players · ${formatCurrency(a.totalBuyInCents)} pot · ${a.transfers.length} transfer${a.transfers.length === 1 ? '' : 's'}.\n\n${state.session.isDemo ? 'This is demo data, so it won’t be saved to History. The session will be locked.' : 'The session will be saved to History and locked.'}`,
     confirmLabel: 'End session', onConfirm: finishSession
   });
 }
@@ -350,7 +352,10 @@ function settleView(): HTMLElement {
 
   view.append(header('Who pays whom', a.transfers.length ? 'tap to mark paid' : ''));
   if (a.transfers.length === 0) {
-    view.append(group(h('div', { class: 'row empty' }, h('span', { text: 'No payments needed 🎉' }))));
+    const msg = a.players.length < 2 ? 'Add at least 2 players to see payments'
+      : !a.isBalanced ? 'Fix the chip mismatch to see payments'
+      : 'No payments needed 🎉';
+    view.append(group(h('div', { class: 'row empty' }, h('span', { text: msg }))));
   } else {
     view.append(group(...a.transfers.map((t, ti) => {
       const key = paidKey(t.id, t.amountCents);
@@ -378,6 +383,7 @@ function settleView(): HTMLElement {
     h('span', { class: `mono ${p.netCents > 0 ? 'good' : p.netCents < 0 ? 'bad' : 'muted'}`, text: formatCurrency(p.netCents, true) })))));
 
   const receipt = () => buildReceipt(s.name, a, s.paid);
+  if (a.players.length === 0) return view;
   view.append(
     h('button', { class: 'btn primary block', text: 'Share / copy receipt', on: { click: async () => {
       const text = receipt();
@@ -387,7 +393,7 @@ function settleView(): HTMLElement {
     h('div', { class: 'two' },
       h('button', { class: 'btn tinted', text: 'Save to history', on: { click: () => { if (saveToHistory(s.isEnded ? 'Completed & Settled' : 'Saved Snapshot')) toast('Saved to History'); else toast('Demo sessions aren’t saved — start a fresh session', 'error'); } } }),
       h('button', { class: 'btn tinted', text: 'Download .txt', on: { click: () => download(`${safeFile(s.name)}_settlement.txt`, sessionText(s)) } })),
-    ...(s.isEnded ? [] : [h('button', { class: 'btn plain block', text: 'End & settle…', on: { click: requestEnd } })])
+    ...(s.isEnded ? [] : [h('button', { class: 'btn plain block', text: 'End & settle…', attrs: { disabled: a.players.length < 2 }, on: { click: requestEnd } })])
   );
   return view;
 }

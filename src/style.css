@@ -9,9 +9,9 @@
 }
 [data-theme='felt']  { --bg:#0a3d2a; --card:rgba(4,32,21,.72); --card2:rgba(255,255,255,.09); --line:rgba(212,175,55,.22); --bar:rgba(5,34,23,.88);
   --accent:#e8c55b; --accent-ink:#2a1f00; --tint:rgba(232,197,91,.16); --good:#5eea8f; --bad:#ff8a80; --muted:#a8c4b5; --gold:#e8c55b; }
-[data-theme='ocean'] { --bg:#06182c; --card:#0d2a47; --card2:#143a60; --bar:rgba(10,34,60,.85); --accent:#5ac8fa; --accent-ink:#00202e; --tint:rgba(90,200,250,.18); --good:#64d2a0; }
-[data-theme='light'] { --bg:#f2f2f7; --card:#fff; --card2:#e9e9ee; --line:rgba(0,0,0,.12); --text:#000; --muted:#6c6c70;
-  --accent:#248a3d; --accent-ink:#fff; --good:#248a3d; --bad:#d70015; --warn:#b25000; --house:#4f46e5; --bar:rgba(249,249,249,.85); --tint:rgba(36,138,61,.12); color-scheme: light; }
+[data-theme='ocean'] { --bg:#06182c; --card:#0d2a47; --card2:#143a60; --muted:#b0bccb; --bar:rgba(10,34,60,.85); --accent:#5ac8fa; --accent-ink:#00202e; --tint:rgba(90,200,250,.18); --good:#64d2a0; }
+[data-theme='light'] { --bg:#f2f2f7; --card:#fff; --card2:#e9e9ee; --line:rgba(0,0,0,.12); --text:#000; --muted:#55555b;
+  --accent:#17692c; --accent-ink:#fff; --good:#17692c; --bad:#b8000f; --warn:#8a4300; --house:#4338ca; --gold:#7a5600; --bar:rgba(249,249,249,.88); --tint:rgba(23,105,44,.12); color-scheme: light; }
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 html, body { margin: 0; height: 100%; background-color: var(--bg); color: var(--text); overscroll-behavior: none; }
@@ -99,7 +99,7 @@ input::placeholder { color: var(--muted); } input:focus { outline: none; color: 
   background: var(--bar); backdrop-filter: saturate(180%) blur(20px); -webkit-backdrop-filter: saturate(180%) blur(20px); border-top: .5px solid var(--line); }
 .tab { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 1px; padding: 4px 0; color: var(--muted); position: relative; min-height: 49px; }
 .tab.on { color: var(--accent); } .tab-icon { font-size: 22px; line-height: 26px; } .tab-label { font-size: 10px; font-weight: 600; }
-.badge { position: absolute; top: 0; left: calc(50% + 6px); background: var(--bad); color: #fff; font-size: 11px; font-weight: 700; min-width: 18px; height: 18px; border-radius: 9px; display: grid; place-items: center; padding: 0 5px; }
+.badge { position: absolute; top: 0; left: calc(50% + 6px); background: #c8101e; color: #fff; font-size: 11px; font-weight: 700; min-width: 18px; height: 18px; border-radius: 9px; display: grid; place-items: center; padding: 0 5px; }
 
 .backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.45); opacity: 0; transition: opacity .2s; z-index: 10; }
 .backdrop.in { opacity: 1; }
