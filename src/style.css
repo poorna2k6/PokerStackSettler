@@ -122,14 +122,19 @@ input::placeholder { color: var(--muted); } input:focus { outline: none; color: 
 .toast.show { transform: translate(-50%, 0); opacity: 1; visibility: visible; transition: transform .25s, opacity .2s; } .toast.error { background: #ff453a; color: #fff; }
 
 @media (max-width: 360px) {
-  .player-top { flex-wrap: wrap; row-gap: 6px; }
-  .player-name { flex: 1 1 96px; }
+  .player-top { flex-wrap: wrap; row-gap: 4px; }
+  .player-name { flex: 1 1 calc(100% - 40px); }
+  .player-name-text { white-space: normal; overflow-wrap: anywhere; }
+  .player-top .net { margin-left: auto; }
   .player-top .chips { display: none; }
+  .stepper { flex: 1 1 auto; min-width: 0; }
   .stepper button { width: 34px; }
-  .stepper span { min-width: 0; padding: 0 2px; font-size: 11px; }
-  .cash { padding: 0 8px; } .cash input { width: 66px; }
+  .stepper span.step-label { min-width: 0; flex: 1; padding: 0 2px; font-size: 11px; display: flex; flex-direction: column; align-items: center; line-height: 1.15; white-space: normal; }
+  .stepper .sep { display: none; }
+  .cash { padding: 0 8px; } .cash input { width: 60px; }
   .kpi { padding: 10px 8px; } .kpi-value { font-size: 13px; }
 }
+.step-label b { font-weight: 600; } .step-label em { font-style: normal; }
 @media (min-width: 700px) { .scroll { padding-top: 24px; } }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 
@@ -214,10 +219,10 @@ input::placeholder { color: var(--muted); } input:focus { outline: none; color: 
 @media (max-width: 360px) {
   .new-btn { padding: 6px 11px; font-size: 13px; }
   .title-actions { gap: 6px; }
-  .player-top { gap: 6px; }
+  .player-top { gap: 6px; row-gap: 4px; }
   .player-top .avatar { width: 28px; height: 38px; } .player-top .avatar b { font-size: 14px; } .player-top .avatar i { font-size: 12px; }
   .player-top .net { font-size: 14px; }
-  .player-name { flex: 1 1 56px; }
+  .kpi-value { font-size: 12px; } .kpi-sub { font-size: 10.5px; }
 }
 
 .view-row .player-name-text { white-space: normal; overflow-wrap: anywhere; }

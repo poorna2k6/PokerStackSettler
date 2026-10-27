@@ -302,7 +302,7 @@ function stepper(id: string, buyIn: number, count: number, locked: boolean, afte
   const bump = (d: number) => () => { haptic(); clink(); rebuy(id, d); after?.(); };
   return h('div', { class: 'stepper' },
     h('button', { text: '−', attrs: { 'aria-label': 'Remove one buy-in', 'data-fk': `minus:${id}`, disabled: locked || buyIn < unit }, on: { click: bump(-1) } }),
-    h('span', { class: 'mono', text: `${formatBuyInCount(count)} · ${formatCurrency(buyIn)}` }),
+    h('span', { class: 'mono step-label' }, h('b', { text: formatBuyInCount(count) }), h('i', { class: 'sep', text: ' · ' }), h('em', { text: formatCurrency(buyIn) })),
     h('button', { text: '+', attrs: { 'aria-label': 'Add one buy-in', 'data-fk': `plus:${id}`, disabled: locked }, on: { click: bump(1) } }));
 }
 
@@ -397,7 +397,7 @@ function openAddPlayer() {
     const countLabel = h('span', { text: `Buy-ins (× ${formatUnit(state.session.defaultBuyIn)})` });
     // On an empty table the unit can be chosen up front, before any buy-in is entered.
     const unit = state.session.players.length === 0 && !state.session.isEnded
-      ? textInput(String(state.session.defaultBuyIn), v => { changeUnit(v); countLabel.textContent = `Buy-ins (× ${formatUnit(state.session.defaultBuyIn)})`; }, { mode: 'decimal', label: 'Buy-in unit' })
+      ? textInput(String(state.session.defaultBuyIn), v => { changeUnit(v); countLabel.textContent = `Buy-ins (× ${formatUnit(state.session.defaultBuyIn)})`; }, { mode: 'decimal', label: 'Buy-in unit for this session' })
       : null;
     const submit = (keepOpen: boolean) => {
       const n = parseFloat(count.value);
@@ -679,8 +679,6 @@ const fkOf = (el: Element) =>
 let lastFocus: string | null = null;
 let lastIndex = 0;
 let lastTabId: Tab | null = null;
-let tabDir = 0;
-let tabTimer: number | undefined;
 
 const focusables = () =>
   [...document.getElementById('app')!.querySelectorAll<HTMLElement>('button, input')].filter(
@@ -694,17 +692,8 @@ document.addEventListener('focusin', e => {
     lastIndex = Math.max(0, focusables().indexOf(t));
   }
 });
-// The Tab direction only matters for the re-render that the Tab itself triggers (an input committing on blur),
-// so it expires quickly; otherwise a later Enter/Space on a control would wrongly push focus forward.
-document.addEventListener('keydown', e => {
-  if (e.key !== 'Tab') { tabDir = 0; return; }
-  tabDir = e.shiftKey ? -1 : 1;
-  clearTimeout(tabTimer);
-  tabTimer = window.setTimeout(() => { tabDir = 0; }, 80);
-}, true);
 
 function restoreFocus() {
-  const dir = tabDir;
   if (!lastFocus || document.querySelector('#sheets .sheet')) return;
   const app = document.getElementById('app')!;
   const active = document.activeElement;
@@ -721,8 +710,7 @@ function restoreFocus() {
     i = items.findIndex(el => el.dataset.fk === `tab:${state.tab}`);
   }
   if (i < 0) i = Math.min(lastIndex, items.length - 1); // control vanished: stay at the same position
-  if (dir !== 0 && fkOf(items[i]) === lastFocus) i = Math.min(items.length - 1, Math.max(0, i + dir));
-  items[i].focus({ preventScroll: dir === 0 });
+  items[i].focus({ preventScroll: true });
 }
 setFocusFallback(restoreFocus);
 
@@ -745,6 +733,11 @@ const isTyping = () => {
   return a instanceof HTMLInputElement && document.getElementById('app')!.contains(a) && a.value !== a.defaultValue;
 };
 // Keyboard blur (Tab) flushes right away; a blur caused by a press waits for the release instead.
+// A text field commits on 'change', which can fire while focus is moving to another field (Tab, voice control,
+// autofill...). Rendering synchronously there would replace the field that is about to receive input, so
+// renders caused by a commit run one task later, when the newly focused field already holds its value.
+let committing = false;
+document.addEventListener('change', () => { committing = true; window.setTimeout(() => { committing = false; }, 0); }, true);
 document.addEventListener('focusout', () => { window.setTimeout(() => { if (!pointerActive) flushRender(); }, 0); });
 const pressStart = (e: Event) => {
   // Tapping empty space blurs the field on purpose; don't pull focus back to it afterwards.
@@ -763,5 +756,8 @@ const pressEnd = (e: Event) => {
 for (const type of ['pointerdown', 'mousedown', 'touchstart']) document.addEventListener(type, pressStart, true);
 for (const type of ['pointerup', 'pointercancel', 'mouseup', 'touchend', 'touchcancel']) document.addEventListener(type, pressEnd, true);
 document.addEventListener('click', () => { window.setTimeout(flushRender, 0); });
-subscribe(() => { if (pointerActive || isTyping()) renderPending = true; else renderAndKeepFocus(); });
+subscribe(() => {
+  if (committing) { renderPending = true; window.setTimeout(() => { if (!pointerActive) flushRender(); }, 0); return; }
+  if (pointerActive || isTyping()) renderPending = true; else renderAndKeepFocus();
+});
 render();
