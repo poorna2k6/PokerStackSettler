@@ -322,7 +322,12 @@ function openAddPlayer() {
 
 function finishSession() {
   if (endSession()) { setTab('settle'); toast('Session settled'); }
-  else toast('Can’t balance this table — check the rake/expense amount', 'error');
+  else {
+    const a = audit();
+    toast(a.expenseCents > a.totalBuyInCents
+      ? 'Rake/expense is larger than all buy-ins — lower it to settle'
+      : 'Can’t balance this table — check the chips and rake', 'error');
+  }
 }
 
 function requestEnd() {
@@ -538,7 +543,7 @@ function render() {
   lastTab = state.tab;
 
   const views: Record<Tab, () => HTMLElement> = { table: tableView, settle: settleView, history: historyView, settings: settingsView };
-  const settleBadge = audit().transfers.filter(t => !state.session.paid[paidKey(t.id, t.amountCents)]).length;
+  const settleBadge = !audit().isBalanced ? 0 : audit().transfers.filter(t => !state.session.paid[paidKey(t.id, t.amountCents)]).length;
 
   const scroll = h('main', { class: 'scroll' },
     h('div', { class: 'large-title' },

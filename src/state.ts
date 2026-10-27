@@ -138,8 +138,13 @@ export function saveToHistory(status = 'Saved Snapshot'): SavedSession | null {
  * e.g. the expense pot is larger than everything that was bought in.
  */
 export function endSession(): boolean {
-  if (!audit().isBalanced) applyReconcile('proRataWinners');
-  if (!audit().isBalanced) return false;
+  if (!audit().isBalanced) {
+    const s = state.session;
+    const fixed = reconcile(s.players, s.expenseCents, 'proRataWinners', s.defaultBuyIn);
+    // Only keep the adjustment if it actually balances; a refusal must not alter what the user typed.
+    if (!solve(fixed, s.expenseCents, s.defaultBuyIn).isBalanced) return false;
+    s.players = fixed;
+  }
   state.session.isEnded = true;
   if (state.session.isDemo) commit(); else saveToHistory('Completed & Settled');
   return true;
