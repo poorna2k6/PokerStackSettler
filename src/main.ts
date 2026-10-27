@@ -254,16 +254,49 @@ function confirmRemove(id: string, name: string, after?: () => void) {
   });
 }
 
+/** Names are never edited inline: the user must confirm, then type the new name in a dedicated sheet. */
+function requestRename(id: string) {
+  const p = state.session.players.find(x => x.id === id);
+  if (!p || state.session.isEnded) return;
+  confirmSheet({
+    title: `Rename ${p.name}?`,
+    message: 'Are you sure you want to change this player’s name? Their buy-ins and chips stay the same.',
+    confirmLabel: 'Yes, rename',
+    onConfirm: () => openRenameSheet(id)
+  });
+}
+
+function openRenameSheet(id: string) {
+  const p = state.session.players.find(x => x.id === id);
+  if (!p) return;
+  openSheet('Rename player', close => {
+    const input = h('input', { attrs: { type: 'text', value: p.name, maxlength: 40, autocomplete: 'off', autocapitalize: 'words', 'aria-label': 'New name', enterkeyhint: 'done' } });
+    input.value = p.name;
+    const save = () => {
+      const next = input.value.trim();
+      if (!next) { toast('Name can’t be empty', 'error'); input.focus(); return; }
+      if (next !== p.name) updatePlayer(id, { name: next.slice(0, 40) });
+      close();
+    };
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') save(); });
+    requestAnimationFrame(() => { input.focus(); input.select(); });
+    return h('div', { class: 'sheet-body' },
+      group(h('label', { class: 'row field' }, h('span', { text: 'Name' }), input)),
+      h('button', { class: 'btn primary block', text: 'Save name', on: { click: save } }),
+      h('button', { class: 'btn plain block', text: 'Cancel', on: { click: close } }));
+  });
+}
+
 function playerRow(i: number, id: string, name: string, buyIn: number, cashOut: number, count: number, net: number, locked: boolean) {
-  const nameInput = textInput(name, v => updatePlayer(id, { name: v.trim().slice(0, 40) || 'Player' }), { disabled: locked, label: 'Player name' });
-  nameInput.classList.add('player-name');
   const cash = textInput(money(cashOut), v => updatePlayer(id, { cashOutCents: Math.max(0, toCents(v)) }), { disabled: locked, mode: 'decimal', label: `${name} ending chips` });
   cash.classList.add('mono');
   const tone = net > 0 ? 'good' : net < 0 ? 'bad' : 'muted';
   return h('div', { class: 'row player' },
     h('div', { class: 'player-top' },
       avatar(i, name),
-      nameInput,
+      h('div', { class: 'player-name' },
+        h('span', { class: 'player-name-text', text: name }),
+        locked ? null : h('button', { class: 'icon-btn small', text: '✎', attrs: { 'aria-label': `Rename ${name}` }, on: { click: () => requestRename(id) } })),
       chipStack(count),
       h('span', { class: `net mono ${tone}`, text: formatCurrency(net, true) }),
       locked ? null : h('button', { class: 'icon-btn', text: '✕', attrs: { 'aria-label': `Remove ${name}` }, on: { click: () => confirmRemove(id, name) } })),
@@ -280,11 +313,13 @@ function openPlayerSheet(id: string) {
       const p = audit().players.find(x => x.id === id);
       if (!p) { close(); return; }
       const locked = state.session.isEnded;
-      const name = textInput(p.name, v => { updatePlayer(id, { name: v.trim().slice(0, 40) || 'Player' }); draw(); }, { disabled: locked, label: 'Player name' });
       const cash = textInput(money(p.cashOutCents), v => { updatePlayer(id, { cashOutCents: Math.max(0, toCents(v)) }); draw(); }, { disabled: locked, mode: 'decimal', label: 'Ending chips' });
       cash.classList.add('mono');
       body.replaceChildren(
-        group(field('Name', name), field('Ending chips ($)', cash)),
+        group(
+          h('div', { class: 'row' }, h('span', { class: 'muted', text: 'Name' }), h('strong', { class: 'grow right', text: p.name }),
+            locked ? null : h('button', { class: 'link', text: 'Rename', attrs: { 'aria-label': `Rename ${p.name}` }, on: { click: () => { close(); requestRename(id); } } })),
+          field('Ending chips ($)', cash)),
         h('div', { class: 'sheet-stepper' }, chipStack(p.buyInCount, 8), stepper(id, p.buyInCents, p.buyInCount, locked, draw)),
         h('div', { class: 'row banner' }, h('span', { class: 'muted', text: 'Net result' }),
           h('strong', { class: `mono ${p.netCents > 0 ? 'good' : p.netCents < 0 ? 'bad' : 'muted'}`, text: formatCurrency(p.netCents, true) })),
