@@ -40,9 +40,11 @@ export interface OvalOptions {
   /** optional small line under the name (e.g. "2x · $200.00") */
   note?: (p: AuditPlayer) => string;
   hint: string;
+  /** seat to draw with a highlight ring ("that's me") */
+  highlightId?: string;
 }
 
-export function ovalTable({ a, label, onSeat, note, hint }: OvalOptions) {
+export function ovalTable({ a, label, onSeat, note, hint, highlightId }: OvalOptions) {
   const n = a.players.length;
   const topId = [...a.players].sort((x, y) => y.netCents - x.netCents)[0]?.id;
   const oval = h('div', { class: `oval ${n > 9 ? 'tiny' : ''}` },
@@ -52,7 +54,7 @@ export function ovalTable({ a, label, onSeat, note, hint }: OvalOptions) {
       chipStack(a.totalBuyInCount, 8)));
   a.players.forEach((p, i) => {
     const ang = Math.PI / 2 + (2 * Math.PI * i) / n;
-    const seat = h('button', { class: 'seat', attrs: { 'aria-label': label(p) }, on: { click: () => onSeat(p) } },
+    const seat = h('button', { class: `seat ${p.id === highlightId ? 'me' : ''}`, attrs: { 'aria-label': label(p) }, on: { click: () => onSeat(p) } },
       avatar(i, p.name),
       i === 0 ? h('span', { class: 'dealer', text: 'D', attrs: { 'aria-hidden': 'true' } }) : null,
       h('span', { class: 'seat-name', text: p.name }),
