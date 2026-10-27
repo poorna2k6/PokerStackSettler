@@ -662,5 +662,33 @@ function restoreFocus() {
 setFocusFallback(restoreFocus);
 
 const renderAndKeepFocus = () => { render(); restoreFocus(); requestAnimationFrame(restoreFocus); };
-subscribe(renderAndKeepFocus);
+
+// An input commits on blur, i.e. on the mousedown of whatever was tapped next. Re-rendering at that moment
+// would replace the tapped control before mouseup (swallowing the tap) and bounce focus back. So while a
+// pointer is down we only note that a render is due, and perform it right after the pointer is released.
+let pointerActive = false;
+let renderPending = false;
+let pointerTimer: number | undefined;
+const flushRender = () => {
+  clearTimeout(pointerTimer);
+  pointerActive = false;
+  if (renderPending && !isTyping()) { renderPending = false; renderAndKeepFocus(); }
+};
+// Never replace a field the user is in the middle of typing in: that would drop the uncommitted text.
+const isTyping = () => {
+  const a = document.activeElement;
+  return a instanceof HTMLInputElement && document.getElementById('app')!.contains(a) && a.value !== a.defaultValue;
+};
+document.addEventListener('focusout', () => { window.setTimeout(flushRender, 0); });
+document.addEventListener('pointerdown', e => {
+  // Tapping empty space blurs the field on purpose; don't pull focus back to it afterwards.
+  if (!(e.target instanceof Element && e.target.closest('button, input, [role="checkbox"]'))) lastFocus = null;
+  pointerActive = true;
+  clearTimeout(pointerTimer);
+  pointerTimer = window.setTimeout(flushRender, 1500); // safety net if the release is never seen
+}, true);
+for (const type of ['pointerup', 'pointercancel']) {
+  document.addEventListener(type, () => { window.setTimeout(flushRender, 0); }, true);
+}
+subscribe(() => { if (pointerActive || isTyping()) renderPending = true; else renderAndKeepFocus(); });
 render();
