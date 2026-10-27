@@ -55,3 +55,17 @@ Abuse limits (per hour): 10 new shares / IP, 1500 host updates / code, 20,000 po
 - **That's me** (shared link): pick your name to highlight your seat and see what you pay or receive.
 - **Standings** and **Save as picture** (settled tables) on both the host's Settle tab and the shared link.
 - Parked ideas live in [`docs/ROADMAP.md`](docs/ROADMAP.md).
+
+## Handing the table to someone else
+The host's phone holds the only edit key. To move it (host leaving, battery dying, someone else taking over):
+**Table → ● Sharing → Hand over the table**.
+- **Someone new (QR):** shows a one-time QR/link, valid 10 minutes. Whoever scans it and taps *Become host* takes over,
+  even if they are not in the player list. The table open on their phone is saved to History first.
+- **A player in the list:** pick them; on their live view they get *"The host wants to hand the table over to you — accept"*.
+  Anyone watching can press accept, so your phone then asks *"Bob accepted. Make them the host?"* before anything changes.
+- Either way the old host's phone becomes a viewer (it keeps its own copy) and **everyone's link stays the same**.
+
+How it stays safe: the new host makes a fresh secret key on their own phone and sends only its SHA-256; the server swaps the
+stored hash, so the old key stops working immediately and no usable key is ever stored or shown. The QR token is random,
+stored only as a hash, works once, expires in 10 minutes, and guessing is rate limited. The rules live in `server/handler.ts`
+(`handleAction`) with tests in `server/handler.test.ts`.

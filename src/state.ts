@@ -79,8 +79,24 @@ export const onShareOrphaned = (fn: (old: Share) => void) => replacedHooks.push(
 /** Every path that swaps the open session goes through here, so a live link can never be orphaned. */
 function replaceSession(next: SessionData) {
   const old = state.session.share;
-  if (old) replacedHooks.forEach(fn => fn(old));
+  // taking over the SAME live table must not end its link
+  if (old && old.code !== next.share?.code) replacedHooks.forEach(fn => fn(old));
   state.session = next;
+}
+
+/**
+ * Becoming the host of a table someone else was running. The table that was open on this phone is kept in
+ * History first, so nothing is lost.
+ */
+export function adoptSharedSession(s: { name: string; defaultBuyIn: number; expenseCents: number; isEnded: boolean; players: Player[]; paid: Record<string, boolean> }, share: NonNullable<SessionData['share']>) {
+  const cur = state.session;
+  if (!cur.isDemo && cur.players.length > 0 && cur.share?.code !== share.code) saveToHistory('Saved before taking over a table');
+  replaceSession({
+    id: uid('sess'), name: s.name, defaultBuyIn: s.defaultBuyIn, expenseCents: s.expenseCents, isEnded: s.isEnded,
+    isDemo: false, share, players: s.players.map(p => ({ ...p })), paid: { ...s.paid }
+  });
+  state.tab = 'table';
+  commit();
 }
 
 export function setShare(share: SessionData['share']) {

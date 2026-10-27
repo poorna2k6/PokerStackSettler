@@ -105,6 +105,7 @@ export interface ConfirmOpts {
   title: string;
   message: string;
   confirmLabel: string;
+  cancelLabel?: string;
   destructive?: boolean;
   onConfirm: () => void;
 }
@@ -118,6 +119,6 @@ export function confirmSheet(o: ConfirmOpts) {
         text: o.confirmLabel,
         on: { click: () => { close(); o.onConfirm(); } }
       }),
-      h('button', { class: 'btn plain block', text: 'Cancel', on: { click: close } }))
+      h('button', { class: 'btn plain block', text: o.cancelLabel ?? 'Cancel', on: { click: close } }))
   );
 }

@@ -68,6 +68,8 @@ function sanitizePaid(raw) {
 // src/shared.ts
 var CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 var CODE_LENGTH = 8;
+var OFFER_TTL_MS = 10 * 60 * 1e3;
+var KEY_HASH_RE = /^[a-f0-9]{64}$/;
 var SHARE_TTL_SECONDS = 7 * 24 * 60 * 60;
 function normalizeCode(raw) {
   const code = String(raw ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
@@ -99,8 +101,12 @@ var LIMITS = {
   // host pushes per code per hour
   read: { max: 2e4, window: 3600 },
   // polls per IP per hour (a household shares one IP)
-  miss: { max: 40, window: 3600 }
+  miss: { max: 40, window: 3600 },
   // unknown-code lookups per IP per hour: stops code guessing
+  claim: { max: 40, window: 3600 },
+  // handover claims per IP per hour
+  claimCode: { max: 60, window: 3600 }
+  // handover claims per code per hour (stops token guessing)
 };
 var sha256 = (s) => createHash("sha256").update(s).digest("hex");
 var json = (status, body, extra = {}) => ({ status, body, headers: { "Cache-Control": "no-store", ...extra } });
@@ -125,6 +131,15 @@ async function load(store, code) {
     return null;
   }
 }
+var sha256hex = sha256;
+function liveOffer(rec, now) {
+  return rec.offer && rec.offer.expiresAt > now ? rec.offer : void 0;
+}
+function publicOffer(rec, now) {
+  const o = liveOffer(rec, now);
+  if (!o) return void 0;
+  return { kind: o.kind, playerId: o.playerId, expiresAt: o.expiresAt, status: o.claim ? "claimed" : "open" };
+}
 async function limited(store, key, rule) {
   return await store.incr(key, rule.window) > rule.max;
 }
@@ -132,19 +147,20 @@ async function handleShare(req, store, now = Date.now(), limits = LIMITS) {
   const method = req.method.toUpperCase();
   const ip = req.ip || "unknown";
   try {
-    if (method === "POST") {
+    if (method === "POST" && !req.query.action) {
       if (await limited(store, `rl:create:${ip}`, limits.create)) return err(429, "Too many new shares, try again later");
       const snapshot = sanitizeSnapshot(req.body?.snapshot, now);
       if (!snapshot) return err(400, "Invalid session");
       let code2 = newCode();
       for (let i = 0; i < 5 && await store.get(`share:${code2}`); i++) code2 = newCode();
       const hostKey = randomBytes(24).toString("base64url");
-      const rec = { keyHash: sha256(hostKey), snapshot, rev: 1, createdAt: now };
+      const rec = { keyHash: sha256(hostKey), snapshot, rev: 1, createdAt: now, epoch: 1 };
       await store.set(`share:${code2}`, JSON.stringify(rec), SHARE_TTL_SECONDS);
-      return json(201, { code: code2, hostKey, rev: 1, expiresAt: now + SHARE_TTL_SECONDS * 1e3 });
+      return json(201, { code: code2, hostKey, rev: 1, epoch: 1, expiresAt: now + SHARE_TTL_SECONDS * 1e3 });
     }
     const code = normalizeCode(req.query.code);
     if (!code) return err(400, "Invalid code");
+    if (req.query.action) return handleAction(req, store, code, now, limits, ip);
     if (method === "GET") {
       if (await limited(store, `rl:read:${ip}`, limits.read)) return err(429, "Too many requests");
       const rec = await load(store, code);
@@ -154,7 +170,13 @@ async function handleShare(req, store, now = Date.now(), limits = LIMITS) {
       }
       const since = Number(req.query.since);
       if (Number.isFinite(since) && since === rec.rev) return json(200, { unchanged: true, rev: rec.rev });
-      return json(200, { snapshot: rec.snapshot, rev: rec.rev, expiresAt: rec.snapshot.updatedAt + SHARE_TTL_SECONDS * 1e3 });
+      return json(200, {
+        snapshot: rec.snapshot,
+        rev: rec.rev,
+        epoch: rec.epoch ?? 1,
+        offer: publicOffer(rec, now),
+        expiresAt: rec.snapshot.updatedAt + SHARE_TTL_SECONDS * 1e3
+      });
     }
     if (method === "PUT" || method === "DELETE") {
       const rec = await load(store, code);
@@ -169,12 +191,88 @@ async function handleShare(req, store, now = Date.now(), limits = LIMITS) {
       if (!snapshot) return err(400, "Invalid session");
       const next = { ...rec, snapshot, rev: rec.rev + 1 };
       await store.set(`share:${code}`, JSON.stringify(next), SHARE_TTL_SECONDS);
-      return json(200, { rev: next.rev, expiresAt: now + SHARE_TTL_SECONDS * 1e3 });
+      return json(200, { rev: next.rev, epoch: next.epoch ?? 1, expiresAt: now + SHARE_TTL_SECONDS * 1e3 });
     }
     return { ...err(405, "Method not allowed"), headers: { Allow: "GET, POST, PUT, DELETE", "Cache-Control": "no-store" } };
   } catch {
     return err(500, "Server error");
   }
+}
+async function handleAction(req, store, code, now, limits, ip) {
+  const action = req.query.action;
+  const method = req.method.toUpperCase();
+  const body = req.body && typeof req.body === "object" ? req.body : {};
+  if (action === "claim") {
+    if (method !== "POST") return err(405, "Method not allowed");
+    if (await limited(store, `rl:claim:${ip}`, limits.claim) || await limited(store, `rl:claimcode:${code}`, limits.claimCode)) {
+      return err(429, "Too many attempts, try again later");
+    }
+    const rec2 = await load(store, code);
+    if (!rec2) return err(404, "Not found or expired");
+    const offer = liveOffer(rec2, now);
+    if (!offer) return err(404, "No hand-over is open");
+    const keyHash = typeof body.keyHash === "string" ? body.keyHash : "";
+    if (!KEY_HASH_RE.test(keyHash)) return err(400, "Invalid key");
+    if (offer.kind === "link") {
+      const token = typeof body.token === "string" ? body.token : "";
+      if (!token || token.length > 200 || !offer.tokenHash || !keyMatches(token, offer.tokenHash)) {
+        return err(403, "This hand-over code is not valid");
+      }
+      const next2 = { ...rec2, keyHash, epoch: (rec2.epoch ?? 1) + 1, rev: rec2.rev + 1, offer: void 0 };
+      await store.set(`share:${code}`, JSON.stringify(next2), SHARE_TTL_SECONDS);
+      return json(200, { ok: true, snapshot: next2.snapshot, rev: next2.rev, epoch: next2.epoch });
+    }
+    if (offer.claim && now - offer.claim.at < 2 * 60 * 1e3) return err(409, "Someone else already accepted \u2014 wait for the host");
+    const next = { ...rec2, rev: rec2.rev + 1, offer: { ...offer, claim: { keyHash, at: now } } };
+    await store.set(`share:${code}`, JSON.stringify(next), SHARE_TTL_SECONDS);
+    return json(200, { ok: true, rev: next.rev });
+  }
+  const rec = await load(store, code);
+  if (!rec) return err(404, "Not found or expired");
+  if (!keyMatches(req.headers["x-host-key"], rec.keyHash)) return err(403, "Only the host can change this table");
+  if (action === "verify") {
+    if (method !== "POST") return err(405, "Method not allowed");
+    return json(200, { ok: true, epoch: rec.epoch ?? 1 });
+  }
+  if (action === "offer") {
+    if (method === "DELETE") {
+      const next2 = { ...rec, rev: rec.rev + 1, offer: void 0 };
+      await store.set(`share:${code}`, JSON.stringify(next2), SHARE_TTL_SECONDS);
+      return json(200, { ok: true });
+    }
+    if (method !== "POST") return err(405, "Method not allowed");
+    if (await limited(store, `rl:write:${code}`, limits.write)) return err(429, "Too many updates");
+    const kind = body.kind;
+    let offer;
+    let token;
+    if (kind === "seat") {
+      const playerId = typeof body.playerId === "string" ? body.playerId : "";
+      if (!rec.snapshot.players.some((p) => p.id === playerId)) return err(400, "Unknown player");
+      offer = { kind: "seat", playerId, expiresAt: now + OFFER_TTL_MS };
+    } else if (kind === "link") {
+      token = randomBytes(18).toString("base64url");
+      offer = { kind: "link", tokenHash: sha256hex(token), expiresAt: now + OFFER_TTL_MS };
+    } else {
+      return err(400, "Invalid offer");
+    }
+    const next = { ...rec, rev: rec.rev + 1, offer };
+    await store.set(`share:${code}`, JSON.stringify(next), SHARE_TTL_SECONDS);
+    return json(201, { offer: publicOffer(next, now), token, rev: next.rev });
+  }
+  if (action === "approve") {
+    if (method !== "POST") return err(405, "Method not allowed");
+    const offer = liveOffer(rec, now);
+    if (!offer || offer.kind !== "seat" || !offer.claim) return err(409, "Nobody has accepted");
+    if (body.approve === true) {
+      const next2 = { ...rec, keyHash: offer.claim.keyHash, epoch: (rec.epoch ?? 1) + 1, rev: rec.rev + 1, offer: void 0 };
+      await store.set(`share:${code}`, JSON.stringify(next2), SHARE_TTL_SECONDS);
+      return json(200, { ok: true, epoch: next2.epoch });
+    }
+    const next = { ...rec, rev: rec.rev + 1, offer: { ...offer, claim: void 0 } };
+    await store.set(`share:${code}`, JSON.stringify(next), SHARE_TTL_SECONDS);
+    return json(200, { ok: true, declined: true });
+  }
+  return err(400, "Unknown action");
 }
 function memoryStore(clock = Date.now) {
   const data = /* @__PURE__ */ new Map();

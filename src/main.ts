@@ -13,5 +13,5 @@ window.addEventListener('hashchange', () => location.reload());
 if (viewing) {
   void import('./viewer').then(m => m.mountViewer(viewing[1]));
 } else {
-  void import('./app');
+  void import('./app').then(() => import('./handover')).then(m => m.afterBoot());
 }
