@@ -97,7 +97,7 @@ export function openSheet(title: string, build: (close: () => void) => Node): Sh
   document.addEventListener('keydown', onKey);
   root.append(backdrop, sheet);
   requestAnimationFrame(() => { sheet.classList.add('in'); backdrop.classList.add('in'); });
-  (sheet.querySelector('input,button.primary') as HTMLElement | null)?.focus();
+  (sheet.querySelector('input, button.primary, button.danger') as HTMLElement | null)?.focus();
   return { close };
 }
 
