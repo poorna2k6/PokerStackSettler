@@ -128,12 +128,12 @@ async function load(store, code) {
 async function limited(store, key, rule) {
   return await store.incr(key, rule.window) > rule.max;
 }
-async function handleShare(req, store, now = Date.now()) {
+async function handleShare(req, store, now = Date.now(), limits = LIMITS) {
   const method = req.method.toUpperCase();
   const ip = req.ip || "unknown";
   try {
     if (method === "POST") {
-      if (await limited(store, `rl:create:${ip}`, LIMITS.create)) return err(429, "Too many new shares, try again later");
+      if (await limited(store, `rl:create:${ip}`, limits.create)) return err(429, "Too many new shares, try again later");
       const snapshot = sanitizeSnapshot(req.body?.snapshot, now);
       if (!snapshot) return err(400, "Invalid session");
       let code2 = newCode();
@@ -146,10 +146,10 @@ async function handleShare(req, store, now = Date.now()) {
     const code = normalizeCode(req.query.code);
     if (!code) return err(400, "Invalid code");
     if (method === "GET") {
-      if (await limited(store, `rl:read:${ip}`, LIMITS.read)) return err(429, "Too many requests");
+      if (await limited(store, `rl:read:${ip}`, limits.read)) return err(429, "Too many requests");
       const rec = await load(store, code);
       if (!rec) {
-        if (await limited(store, `rl:miss:${ip}`, LIMITS.miss)) return err(429, "Too many requests");
+        if (await limited(store, `rl:miss:${ip}`, limits.miss)) return err(429, "Too many requests");
         return err(404, "Not found or expired");
       }
       const since = Number(req.query.since);
@@ -164,7 +164,7 @@ async function handleShare(req, store, now = Date.now()) {
         await store.del(`share:${code}`);
         return json(200, { ok: true });
       }
-      if (await limited(store, `rl:write:${code}`, LIMITS.write)) return err(429, "Too many updates");
+      if (await limited(store, `rl:write:${code}`, limits.write)) return err(429, "Too many updates");
       const snapshot = sanitizeSnapshot(req.body?.snapshot, now);
       if (!snapshot) return err(400, "Invalid session");
       const next = { ...rec, snapshot, rev: rec.rev + 1 };

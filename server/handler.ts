@@ -23,7 +23,7 @@ export interface Store {
 interface Record_ { keyHash: string; snapshot: SharedSnapshot; rev: number; createdAt: number }
 
 export const MAX_BODY_BYTES = 32 * 1024;
-const LIMITS = {
+export const LIMITS = {
   create: { max: 10, window: 3600 },       // new shares per IP per hour
   write: { max: 1500, window: 3600 },      // host pushes per code per hour
   read: { max: 20000, window: 3600 },      // polls per IP per hour (a household shares one IP)
@@ -58,13 +58,15 @@ async function limited(store: Store, key: string, rule: { max: number; window: n
   return (await store.incr(key, rule.window)) > rule.max;
 }
 
-export async function handleShare(req: ApiRequest, store: Store, now = Date.now()): Promise<ApiResponse> {
+export type Limits = typeof LIMITS;
+
+export async function handleShare(req: ApiRequest, store: Store, now = Date.now(), limits: Limits = LIMITS): Promise<ApiResponse> {
   const method = req.method.toUpperCase();
   const ip = req.ip || 'unknown';
 
   try {
     if (method === 'POST') {
-      if (await limited(store, `rl:create:${ip}`, LIMITS.create)) return err(429, 'Too many new shares, try again later');
+      if (await limited(store, `rl:create:${ip}`, limits.create)) return err(429, 'Too many new shares, try again later');
       const snapshot = sanitizeSnapshot((req.body as { snapshot?: unknown } | null)?.snapshot, now);
       if (!snapshot) return err(400, 'Invalid session');
       let code = newCode();
@@ -79,10 +81,10 @@ export async function handleShare(req: ApiRequest, store: Store, now = Date.now(
     if (!code) return err(400, 'Invalid code');
 
     if (method === 'GET') {
-      if (await limited(store, `rl:read:${ip}`, LIMITS.read)) return err(429, 'Too many requests');
+      if (await limited(store, `rl:read:${ip}`, limits.read)) return err(429, 'Too many requests');
       const rec = await load(store, code);
       if (!rec) {
-        if (await limited(store, `rl:miss:${ip}`, LIMITS.miss)) return err(429, 'Too many requests');
+        if (await limited(store, `rl:miss:${ip}`, limits.miss)) return err(429, 'Too many requests');
         return err(404, 'Not found or expired');
       }
       const since = Number(req.query.since);
@@ -96,7 +98,7 @@ export async function handleShare(req: ApiRequest, store: Store, now = Date.now(
       if (!rec) return err(404, 'Not found or expired');
       if (!keyMatches(req.headers['x-host-key'], rec.keyHash)) return err(403, 'Only the host can change this table');
       if (method === 'DELETE') { await store.del(`share:${code}`); return json(200, { ok: true }); }
-      if (await limited(store, `rl:write:${code}`, LIMITS.write)) return err(429, 'Too many updates');
+      if (await limited(store, `rl:write:${code}`, limits.write)) return err(429, 'Too many updates');
       const snapshot = sanitizeSnapshot((req.body as { snapshot?: unknown } | null)?.snapshot, now);
       if (!snapshot) return err(400, 'Invalid session');
       const next: Record_ = { ...rec, snapshot, rev: rec.rev + 1 };

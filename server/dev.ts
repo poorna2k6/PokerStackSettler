@@ -1,7 +1,10 @@
 // Mounts /api/share in the Vite dev and preview servers, using an in-memory store, so the whole
 // feature can be run and tested locally without Vercel or Redis.
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { MAX_BODY_BYTES, handleShare, memoryStore } from './handler';
+import { LIMITS, MAX_BODY_BYTES, handleShare, memoryStore } from './handler';
+
+// Local dev/preview only: many test browsers share one IP, so allow far more new shares than production.
+const DEV_LIMITS = { ...LIMITS, create: { max: 500, window: 3600 } };
 
 export function shareApiMiddleware() {
   const store = memoryStore();
@@ -27,7 +30,9 @@ export function shareApiMiddleware() {
     for (const [k, v] of Object.entries(req.headers)) headers[k] = Array.isArray(v) ? v[0] : v;
     const out = await handleShare(
       { method: req.method ?? 'GET', query, headers, body, ip: req.socket.remoteAddress ?? 'dev' },
-      store
+      store,
+      Date.now(),
+      DEV_LIMITS
     );
     res.statusCode = out.status;
     res.setHeader('Content-Type', 'application/json');
