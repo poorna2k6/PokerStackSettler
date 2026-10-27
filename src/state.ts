@@ -48,7 +48,15 @@ state.storageOk = saveLive(state.session);
 
 type Listener = () => void;
 const listeners: Listener[] = [];
-export const subscribe = (fn: Listener) => listeners.push(fn);
+export const subscribe = (fn: Listener) => {
+  listeners.push(fn);
+  return () => { const i = listeners.indexOf(fn); if (i >= 0) listeners.splice(i, 1); };
+};
+/** Re-renders without counting as an edit (used for sync status changes). */
+export const notify = () => listeners.forEach(fn => fn());
+/** Hooks that run after every committed change to the session (e.g. live-share sync). */
+const commitHooks: Listener[] = [];
+export const onCommit = (fn: Listener) => commitHooks.push(fn);
 
 const stamp = (d = new Date()) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
@@ -56,11 +64,26 @@ const stamp = (d = new Date()) =>
 export function commit() {
   state.storageOk = saveLive(state.session);
   state.lastSave = stamp().slice(11);
+  commitHooks.forEach(fn => fn());
   listeners.forEach(fn => fn());
 }
 
 export const audit = () => solve(state.session.players, state.session.expenseCents, state.session.defaultBuyIn);
 export { paidKey } from './engine';
+
+export function setShare(share: SessionData['share']) {
+  state.session.share = share;
+  commit();
+}
+
+/** What viewers are allowed to see: the table itself, never the host key. */
+export function shareSnapshot() {
+  const s = state.session;
+  return {
+    name: s.name, defaultBuyIn: s.defaultBuyIn, expenseCents: s.expenseCents,
+    isEnded: s.isEnded, players: s.players, paid: s.paid
+  };
+}
 
 export function setTab(tab: Tab) { state.tab = tab; listeners.forEach(fn => fn()); }
 export function setTheme(theme: Theme) { state.theme = theme; state.storageOk = saveTheme(theme) && state.storageOk; listeners.forEach(fn => fn()); }
