@@ -41,9 +41,26 @@ export const MAX_NAME = 40;
 /** Largest participant count for which the provably minimal transfer search runs. */
 const EXACT_LIMIT = 16;
 
+/**
+ * Parses a money value to integer cents, rounding half-up on the decimal digits
+ * (so 1.005 → 101, not 100 via binary floating point). Tolerates `$`, commas and
+ * spaces; anything that isn't a plain decimal number (letters, 1e3, …) is 0.
+ */
 export function toCents(val: unknown): number {
-  const num = typeof val === 'number' ? val : parseFloat(String(val ?? ''));
-  return Number.isFinite(num) ? Math.round(num * 100) : 0;
+  const str = typeof val === 'number' ? (Number.isFinite(val) ? String(val) : '') : String(val ?? '');
+  const m = /^(-?)(\d*)(?:\.(\d*))?$/.exec(str.replace(/[$,\s]/g, ''));
+  if (!m || (m[2] === '' && !m[3])) return 0;
+  const whole = Number(m[2] || '0');
+  const frac = (m[3] ?? '').padEnd(3, '0');
+  let cents = whole * 100 + Number(frac.slice(0, 2)) + (Number(frac[2]) >= 5 ? 1 : 0);
+  if (!Number.isFinite(cents) || cents > Number.MAX_SAFE_INTEGER) return 0;
+  if (m[1]) cents = -cents;
+  return cents === 0 ? 0 : cents;
+}
+
+/** "$100", "$1.50", "$0.25" */
+export function formatUnit(dollars: number): string {
+  return Number.isInteger(dollars) ? `$${dollars}` : `$${dollars.toFixed(2)}`;
 }
 
 export function formatCurrency(cents: number, showSign = false): string {
@@ -52,7 +69,7 @@ export function formatCurrency(cents: number, showSign = false): string {
 }
 
 export function unitCentsFor(stdBuyInDollars: number): number {
-  return Math.max(100, toCents(stdBuyInDollars || 100));
+  return Math.max(1, toCents(stdBuyInDollars || 100));
 }
 
 export function buyInCount(buyInCents: number, stdBuyInDollars: number): number {
@@ -325,9 +342,18 @@ export interface SavedSession {
   players: Player[];
 }
 
+export const MIN_UNIT = 0.01;
+export const MAX_UNIT = 100000;
+
+/** Returns the unit rounded to cents, or null when it is out of range / not a number. */
+export function parseBuyInUnit(v: unknown): number | null {
+  const cents = toCents(v);
+  const n = cents / 100;
+  return n >= MIN_UNIT && n <= MAX_UNIT ? n : null;
+}
+
 export function sanitizeBuyIn(v: unknown): number {
-  const n = Number(v);
-  return Number.isFinite(n) && n >= 1 && n <= 100000 ? n : 100;
+  return parseBuyInUnit(v) ?? 100;
 }
 
 export function sanitizeSaved(raw: unknown): SavedSession | null {

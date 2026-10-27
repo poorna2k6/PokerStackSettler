@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  buildNotepad, leaderboard, parseBackup, reconcile, sanitizePlayers, settleNodes, solve,
+  buildNotepad, buyInCount, formatUnit, leaderboard, parseBuyInUnit, sanitizeBuyIn, parseBackup, reconcile, sanitizePlayers, settleNodes, solve,
   toCents, type Player
 } from './engine';
 
@@ -40,6 +40,50 @@ describe('toCents', () => {
     expect(toCents('abc')).toBe(0);
     expect(toCents(Infinity)).toBe(0);
     expect(toCents(0)).toBe(0);
+    expect(toCents(undefined)).toBe(0);
+  });
+
+  it('rounds half-up on the decimal string, not on binary floats', () => {
+    expect(toCents('1.005')).toBe(101);
+    expect(toCents('0.285')).toBe(29);
+    expect(toCents(1.005)).toBe(101);
+    expect(toCents('61.75')).toBe(6175);
+    expect(toCents('0.1') + toCents('0.2')).toBe(30);
+  });
+
+  it('tolerates $ , and spaces; rejects junk', () => {
+    expect(toCents('$1,000.50')).toBe(100050);
+    expect(toCents(' $20 ')).toBe(2000);
+    expect(toCents('.5')).toBe(50);
+    expect(toCents('5.')).toBe(500);
+    expect(toCents('-5')).toBe(-500);
+    expect(toCents('1e3')).toBe(0);
+    expect(toCents('1.2.3')).toBe(0);
+    expect(toCents('')).toBe(0);
+    expect(toCents('.')).toBe(0);
+    expect(toCents('9'.repeat(40))).toBe(0);
+  });
+});
+
+describe('buy-in unit', () => {
+  it('accepts $0.01 to $100,000 and rounds to cents', () => {
+    expect(parseBuyInUnit('0.5')).toBe(0.5);
+    expect(parseBuyInUnit('25.555')).toBe(25.56);
+    expect(parseBuyInUnit('100000')).toBe(100000);
+    expect(parseBuyInUnit('0')).toBeNull();
+    expect(parseBuyInUnit('abc')).toBeNull();
+    expect(parseBuyInUnit('100001')).toBeNull();
+    expect(sanitizeBuyIn('nope')).toBe(100);
+  });
+
+  it('counts buy-ins correctly for sub-dollar units', () => {
+    expect(buyInCount(250, 0.5)).toBe(5);
+  });
+
+  it('formats units', () => {
+    expect(formatUnit(100)).toBe('$100');
+    expect(formatUnit(1.5)).toBe('$1.50');
+    expect(formatUnit(0.25)).toBe('$0.25');
   });
 });
 

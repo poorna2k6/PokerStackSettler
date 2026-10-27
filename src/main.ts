@@ -4,7 +4,7 @@ import { registerSW } from 'virtual:pwa-register';
 import { h, haptic, openSheet, confirmSheet, toast } from './dom';
 import { clink, setSoundEnabled } from './sound';
 import {
-  buildReceipt, formatBuyInCount, type Audit, formatCurrency, leaderboard, toCents, unitCentsFor,
+  buildReceipt, formatBuyInCount, formatUnit, MAX_UNIT, MIN_UNIT, type Audit, formatCurrency, leaderboard, toCents, unitCentsFor,
   type SavedSession
 } from './engine';
 import { PRESETS } from './presets';
@@ -21,6 +21,8 @@ const THEME_COLORS: Record<Theme, string> = { midnight: '#000000', felt: '#0a3d2
 setSoundEnabled(state.prefs.sound);
 let animateSettle = false;
 const money = (c: number) => (c / 100).toFixed(2);
+const unitError = () => toast(`Buy-in unit must be between ${formatUnit(MIN_UNIT)} and ${formatUnit(MAX_UNIT)}`, 'error');
+const changeUnit = (v: string) => { if (!setUnit(v)) unitError(); };
 
 // ---------------------------------------------------------------- helpers
 
@@ -137,7 +139,7 @@ function tableView(): HTMLElement {
       class: state.prefs.view === v ? 'on' : '',
       on: { click: () => setPrefs({ view: v }) }
     })));
-  view.append(h('div', { class: 'players-head' }, h('span', { class: 'section-inline', text: `Players · $${s.defaultBuyIn}/buy-in` }), seg));
+  view.append(h('div', { class: 'players-head' }, h('span', { class: 'section-inline', text: `Players · ${formatUnit(s.defaultBuyIn)}/buy-in` }), seg));
 
   if (s.players.length === 0) {
     view.append(group(h('div', { class: 'row empty' }, h('span', { text: 'No players yet — add the first seat.' }))));
@@ -153,7 +155,7 @@ function tableView(): HTMLElement {
   view.append(header('Session'));
   view.append(group(
     field('Name', textInput(s.name, setName, { disabled: locked, label: 'Session name' })),
-    field('Buy-in unit ($)', textInput(String(s.defaultBuyIn), setUnit, { disabled: locked, mode: 'decimal', label: 'Buy-in unit' })),
+    field('Buy-in unit ($)', textInput(String(s.defaultBuyIn), changeUnit, { disabled: locked, mode: 'decimal', label: 'Buy-in unit' })),
     field('Rake / expense ($)', textInput(money(s.expenseCents), setExpense, { disabled: locked, mode: 'decimal', label: 'Expense pot' }))
   ));
 
@@ -287,10 +289,10 @@ function openAddPlayer() {
   openSheet('Add player', close => {
     const name = h('input', { attrs: { type: 'text', placeholder: 'Name', autocapitalize: 'words', autocomplete: 'off', 'aria-label': 'Player name', enterkeyhint: 'done' } });
     const count = h('input', { attrs: { type: 'text', inputmode: 'decimal', value: '1', 'aria-label': 'Number of buy-ins' } });
-    const countLabel = h('span', { text: `Buy-ins (× $${state.session.defaultBuyIn})` });
+    const countLabel = h('span', { text: `Buy-ins (× ${formatUnit(state.session.defaultBuyIn)})` });
     // On an empty table the unit can be chosen up front, before any buy-in is entered.
     const unit = state.session.players.length === 0 && !state.session.isEnded
-      ? textInput(String(state.session.defaultBuyIn), v => { setUnit(v); countLabel.textContent = `Buy-ins (× $${state.session.defaultBuyIn})`; }, { mode: 'decimal', label: 'Buy-in unit' })
+      ? textInput(String(state.session.defaultBuyIn), v => { changeUnit(v); countLabel.textContent = `Buy-ins (× ${formatUnit(state.session.defaultBuyIn)})`; }, { mode: 'decimal', label: 'Buy-in unit' })
       : null;
     const submit = (keepOpen: boolean) => {
       const n = parseFloat(count.value);

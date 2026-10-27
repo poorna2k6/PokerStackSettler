@@ -1,5 +1,5 @@
 import {
-  buildNotepad, parseBackup, reconcile, sanitizeBuyIn, solve, toCents,
+  buildNotepad, parseBackup, parseBuyInUnit, reconcile, solve, toCents,
   type Player, type ReconcileMode, type SavedSession, type SessionData
 } from './engine';
 import { PRESETS, type Preset } from './presets';
@@ -70,7 +70,13 @@ export function setPrefs(patch: Partial<Prefs>) {
 }
 
 export function setName(name: string) { state.session.name = name.trim().slice(0, 80) || 'Poker Session'; commit(); }
-export function setUnit(v: string) { state.session.defaultBuyIn = sanitizeBuyIn(parseFloat(v)); commit(); }
+/** Returns false (and keeps the old unit) when the value is invalid. */
+export function setUnit(v: string): boolean {
+  const n = parseBuyInUnit(v);
+  if (n !== null) state.session.defaultBuyIn = n;
+  commit();
+  return n !== null;
+}
 export function setExpense(v: string) { state.session.expenseCents = Math.max(0, toCents(v)); commit(); }
 
 export function addPlayer(name: string, buyIns: number) {
