@@ -309,6 +309,8 @@ export interface SessionData {
   defaultBuyIn: number;
   expenseCents: number;
   isEnded: boolean;
+  /** true while showing built-in demo data; demo sessions are never saved to History */
+  isDemo?: boolean;
   players: Player[];
   paid: Record<string, boolean>;
 }

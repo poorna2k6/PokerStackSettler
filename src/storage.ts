@@ -30,7 +30,7 @@ export function loadTheme(): Theme {
     const t = localStorage.getItem(THEME_KEY) as Theme | null;
     if (t && (THEMES as readonly string[]).includes(t)) return t;
   } catch { /* ignore */ }
-  return 'midnight';
+  return 'felt';
 }
 export const saveTheme = (t: Theme) => write(THEME_KEY, t);
 
@@ -52,6 +52,7 @@ export function loadLive(): SessionData | null {
     defaultBuyIn: sanitizeBuyIn(o.defaultBuyIn),
     expenseCents,
     isEnded: o.isEnded === true,
+    isDemo: o.isDemo === true,
     players,
     paid
   };
@@ -60,7 +61,7 @@ export function loadLive(): SessionData | null {
 export const saveLive = (s: SessionData) =>
   write(LIVE_KEY, {
     id: s.id, name: s.name, defaultBuyIn: s.defaultBuyIn, expenseCents: s.expenseCents,
-    isEnded: s.isEnded, players: s.players, paid: s.paid
+    isEnded: s.isEnded, isDemo: s.isDemo === true, players: s.players, paid: s.paid
   });
 
 export function loadVault(): SavedSession[] {
@@ -69,3 +70,12 @@ export function loadVault(): SavedSession[] {
   return raw.map(sanitizeSaved).filter((s): s is SavedSession => s !== null);
 }
 export const saveVault = (v: SavedSession[]) => write(VAULT_KEY, v);
+
+export interface Prefs { sound: boolean; view: 'list' | 'table' }
+const PREFS_KEY = 'stacksettle_prefs_v1';
+
+export function loadPrefs(): Prefs {
+  const o = read(PREFS_KEY) as Partial<Prefs> | null;
+  return { sound: o?.sound === true, view: o?.view === 'table' ? 'table' : 'list' };
+}
+export const savePrefs = (p: Prefs) => write(PREFS_KEY, p);

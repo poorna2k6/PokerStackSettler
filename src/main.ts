@@ -1,8 +1,10 @@
+import '@fontsource/playfair-display/latin-700.css';
 import './style.css';
 import { registerSW } from 'virtual:pwa-register';
 import { h, haptic, openSheet, confirmSheet, toast } from './dom';
+import { clink, setSoundEnabled } from './sound';
 import {
-  buildReceipt, formatBuyInCount, formatCurrency, leaderboard, toCents, unitCentsFor,
+  buildReceipt, formatBuyInCount, type Audit, formatCurrency, leaderboard, toCents, unitCentsFor,
   type SavedSession
 } from './engine';
 import { PRESETS } from './presets';
@@ -10,12 +12,14 @@ import { THEMES, type Theme } from './storage';
 import {
   addPlayer, applyReconcile, audit, clearHistory, deleteSaved, endSession, importBackup, loadSaved,
   newSession, paidKey, rebuy, removePlayer, reopenSession, saveToHistory, sessionText, setExpense,
-  setName, setTab, setTheme, setUnit, state, subscribe, togglePaid, updatePlayer, type Tab
+  setName, setPrefs, setTab, setTheme, setUnit, state, subscribe, togglePaid, updatePlayer, type Tab
 } from './state';
 
 registerSW({ immediate: true });
 
-const THEME_COLORS: Record<Theme, string> = { midnight: '#000000', felt: '#06281c', ocean: '#06182c', light: '#f2f2f7' };
+const THEME_COLORS: Record<Theme, string> = { midnight: '#000000', felt: '#0a3d2a', ocean: '#06182c', light: '#f2f2f7' };
+setSoundEnabled(state.prefs.sound);
+let animateSettle = false;
 const money = (c: number) => (c / 100).toFixed(2);
 
 // ---------------------------------------------------------------- helpers
@@ -67,11 +71,37 @@ function textInput(value: string, onChange: (v: string) => void, opts: { disable
 
 // ---------------------------------------------------------------- views
 
+function startFresh() {
+  newSession();
+  toast('Fresh table ready — add your players');
+  openAddPlayer();
+}
+
+function requestNew() {
+  const s = state.session;
+  if (s.isDemo || s.players.length === 0) { startFresh(); return; }
+  confirmSheet({
+    title: 'Start a new session?',
+    message: s.isEnded
+      ? 'The current settled session stays in History.'
+      : 'The current table will be replaced. Save it to History first if you need it.',
+    confirmLabel: 'Start new session', destructive: !s.isEnded, onConfirm: startFresh
+  });
+}
+
 function tableView(): HTMLElement {
   const s = state.session;
   const a = audit();
   const locked = s.isEnded;
   const view = h('div', { class: 'view' });
+
+  if (s.isDemo) {
+    view.append(h('div', { class: 'demo-card' },
+      h('div', { class: 'grow' },
+        h('strong', { text: '🎲 Demo mode' }),
+        h('div', { class: 'small', text: 'You’re looking at sample data. It is never saved to History.' })),
+      h('button', { class: 'btn primary', text: 'Start fresh', on: { click: startFresh } })));
+  }
 
   view.append(
     h('div', { class: 'kpis' },
@@ -100,11 +130,21 @@ function tableView(): HTMLElement {
     );
   }
 
-  view.append(header('Players', `$${s.defaultBuyIn} per buy-in`));
+  const seg = h('div', { class: 'segmented', attrs: { role: 'tablist', 'aria-label': 'Player view' } },
+    ...(['list', 'table'] as const).map(v => h('button', {
+      text: v === 'list' ? 'List' : 'Table',
+      attrs: { role: 'tab', 'aria-selected': state.prefs.view === v },
+      class: state.prefs.view === v ? 'on' : '',
+      on: { click: () => setPrefs({ view: v }) }
+    })));
+  view.append(h('div', { class: 'players-head' }, h('span', { class: 'section-inline', text: `Players · $${s.defaultBuyIn}/buy-in` }), seg));
+
   if (s.players.length === 0) {
-    view.append(group(h('div', { class: 'row empty' }, h('span', { text: 'No players yet — tap + to add the first seat.' }))));
+    view.append(group(h('div', { class: 'row empty' }, h('span', { text: 'No players yet — add the first seat.' }))));
+  } else if (state.prefs.view === 'table') {
+    view.append(seatsView(a, locked));
   } else {
-    view.append(group(...a.players.map(p => playerRow(p.id, p.name, p.buyInCents, p.cashOutCents, p.buyInCount, p.netCents, locked))));
+    view.append(group(...a.players.map((p, i) => playerRow(i, p.id, p.name, p.buyInCents, p.cashOutCents, p.buyInCount, p.netCents, locked))));
   }
   if (!locked) {
     view.append(h('button', { class: 'btn tinted block', text: '＋ Add player', on: { click: openAddPlayer } }));
@@ -128,6 +168,50 @@ function tableView(): HTMLElement {
   return view;
 }
 
+const SUITS = ['♠', '♥', '♦', '♣'];
+const initial = (name: string) => (name.trim().match(/[\p{L}\p{N}]/u)?.[0] ?? '?').toUpperCase();
+
+function avatar(i: number, name: string) {
+  const suit = SUITS[i % 4];
+  return h('span', { class: `avatar ${i % 4 === 1 || i % 4 === 2 ? 'red' : ''}`, attrs: { 'aria-hidden': 'true' } },
+    h('b', { text: initial(name) }), h('i', { text: suit }));
+}
+
+/** A little stack of casino chips, one per buy-in (capped). */
+function chipStack(count: number, max = 6) {
+  const n = Math.max(0, Math.min(max, Math.ceil(count)));
+  return h('span', { class: 'chips', attrs: { 'aria-hidden': 'true' } },
+    ...Array.from({ length: n }, (_, i) => h('i', { class: `chip-disc c${i % 5}` })));
+}
+
+function seatsView(a: Audit, locked: boolean) {
+  const n = a.players.length;
+  const topId = [...a.players].sort((x, y) => y.netCents - x.netCents)[0]?.id;
+  const oval = h('div', { class: `oval ${n > 9 ? 'tiny' : ''}` },
+    h('div', { class: 'oval-center' },
+      h('div', { class: 'kpi-label', text: 'Pot' }),
+      h('div', { class: 'mono pot', text: formatCurrency(a.totalBuyInCents) }),
+      chipStack(a.totalBuyInCount, 8)));
+  a.players.forEach((p, i) => {
+    const ang = Math.PI / 2 + (2 * Math.PI * i) / n;
+    const seat = h('button', {
+      class: 'seat',
+      attrs: { 'aria-label': `${p.name}: ${formatBuyInCount(p.buyInCount)} in, net ${formatCurrency(p.netCents, true)}. Tap to edit.` },
+      on: { click: () => openPlayerSheet(p.id) }
+    },
+      avatar(i, p.name),
+      i === 0 ? h('span', { class: 'dealer', text: 'D', attrs: { 'aria-hidden': 'true' } }) : null,
+      h('span', { class: 'seat-name', text: p.name }),
+      h('span', { class: `seat-net mono ${p.netCents > 0 ? 'good' : p.netCents < 0 ? 'bad' : 'muted'}`, text: formatCurrency(p.netCents, true) }),
+      p.id === topId && p.netCents > 0 ? h('span', { class: 'crown', text: '👑', attrs: { 'aria-hidden': 'true' } }) : null);
+    seat.style.left = `${50 + 41 * Math.cos(ang)}%`;
+    seat.style.top = `${50 + 41 * Math.sin(ang)}%`;
+    oval.append(seat);
+  });
+  return h('div', { class: 'oval-wrap' }, oval,
+    h('div', { class: 'foot', text: locked ? 'Tap a seat to view details' : 'Tap a seat to edit buy-ins and chips' }));
+}
+
 function storageNote() {
   return state.storageOk
     ? `✓ Auto-saved on this device${state.lastSave ? ' · ' + state.lastSave : ''}`
@@ -141,8 +225,23 @@ function kpi(label: string, value: string, sub?: string, tone = '') {
     sub ? h('div', { class: 'kpi-sub mono', text: sub }) : null);
 }
 
-function playerRow(id: string, name: string, buyIn: number, cashOut: number, count: number, net: number, locked: boolean) {
+function stepper(id: string, buyIn: number, count: number, locked: boolean, after?: () => void) {
   const unit = unitCentsFor(state.session.defaultBuyIn);
+  const bump = (d: number) => () => { haptic(); clink(); rebuy(id, d); after?.(); };
+  return h('div', { class: 'stepper' },
+    h('button', { text: '−', attrs: { 'aria-label': 'Remove one buy-in', disabled: locked || buyIn < unit }, on: { click: bump(-1) } }),
+    h('span', { class: 'mono', text: `${formatBuyInCount(count)} · ${formatCurrency(buyIn)}` }),
+    h('button', { text: '+', attrs: { 'aria-label': 'Add one buy-in', disabled: locked }, on: { click: bump(1) } }));
+}
+
+function confirmRemove(id: string, name: string, after?: () => void) {
+  confirmSheet({
+    title: `Remove ${name}?`, message: 'Their buy-ins and chips will be deleted from this session.',
+    confirmLabel: 'Remove', destructive: true, onConfirm: () => { removePlayer(id); after?.(); }
+  });
+}
+
+function playerRow(i: number, id: string, name: string, buyIn: number, cashOut: number, count: number, net: number, locked: boolean) {
   const nameInput = textInput(name, v => updatePlayer(id, { name: v.trim().slice(0, 40) || 'Player' }), { disabled: locked, label: 'Player name' });
   nameInput.classList.add('player-name');
   const cash = textInput(money(cashOut), v => updatePlayer(id, { cashOutCents: Math.max(0, toCents(v)) }), { disabled: locked, mode: 'decimal', label: `${name} ending chips` });
@@ -150,17 +249,38 @@ function playerRow(id: string, name: string, buyIn: number, cashOut: number, cou
   const tone = net > 0 ? 'good' : net < 0 ? 'bad' : 'muted';
   return h('div', { class: 'row player' },
     h('div', { class: 'player-top' },
+      avatar(i, name),
       nameInput,
+      chipStack(count),
       h('span', { class: `net mono ${tone}`, text: formatCurrency(net, true) }),
-      locked ? null : h('button', { class: 'icon-btn', text: '✕', attrs: { 'aria-label': `Remove ${name}` }, on: { click: () => confirmSheet({
-        title: `Remove ${name}?`, message: 'Their buy-ins and chips will be deleted from this session.',
-        confirmLabel: 'Remove', destructive: true, onConfirm: () => removePlayer(id) }) } })),
+      locked ? null : h('button', { class: 'icon-btn', text: '✕', attrs: { 'aria-label': `Remove ${name}` }, on: { click: () => confirmRemove(id, name) } })),
     h('div', { class: 'player-bottom' },
-      h('div', { class: 'stepper' },
-        h('button', { text: '−', attrs: { 'aria-label': 'Remove one buy-in', disabled: locked || buyIn < unit }, on: { click: () => { haptic(); rebuy(id, -1); } } }),
-        h('span', { class: 'mono', text: `${formatBuyInCount(count)} · ${formatCurrency(buyIn)}` }),
-        h('button', { text: '+', attrs: { 'aria-label': 'Add one buy-in', disabled: locked }, on: { click: () => { haptic(); rebuy(id, 1); } } })),
+      stepper(id, buyIn, count, locked),
       h('label', { class: 'cash' }, h('span', { class: 'muted', text: '$', attrs: { 'aria-hidden': 'true' } }), cash)));
+}
+
+/** Edit sheet used from the oval-table view. Redraws itself after every change. */
+function openPlayerSheet(id: string) {
+  openSheet('Player', close => {
+    const body = h('div', { class: 'sheet-body' });
+    const draw = () => {
+      const p = audit().players.find(x => x.id === id);
+      if (!p) { close(); return; }
+      const locked = state.session.isEnded;
+      const name = textInput(p.name, v => { updatePlayer(id, { name: v.trim().slice(0, 40) || 'Player' }); draw(); }, { disabled: locked, label: 'Player name' });
+      const cash = textInput(money(p.cashOutCents), v => { updatePlayer(id, { cashOutCents: Math.max(0, toCents(v)) }); draw(); }, { disabled: locked, mode: 'decimal', label: 'Ending chips' });
+      cash.classList.add('mono');
+      body.replaceChildren(
+        group(field('Name', name), field('Ending chips ($)', cash)),
+        h('div', { class: 'sheet-stepper' }, chipStack(p.buyInCount, 8), stepper(id, p.buyInCents, p.buyInCount, locked, draw)),
+        h('div', { class: 'row banner' }, h('span', { class: 'muted', text: 'Net result' }),
+          h('strong', { class: `mono ${p.netCents > 0 ? 'good' : p.netCents < 0 ? 'bad' : 'muted'}`, text: formatCurrency(p.netCents, true) })),
+        ...(locked ? [] : [h('button', { class: 'btn danger block', text: 'Remove player', on: { click: () => { close(); confirmRemove(id, p.name); } } })])
+      );
+    };
+    draw();
+    return body;
+  });
 }
 
 function openAddPlayer() {
@@ -202,6 +322,7 @@ function settleView(): HTMLElement {
   const s = state.session;
   const a = audit();
   const view = h('div', { class: 'view' });
+  if (s.isDemo) view.append(h('div', { class: 'demo-card' }, h('div', { class: 'grow' }, h('strong', { text: '🎲 Demo mode' }), h('div', { class: 'small', text: 'Sample data — not saved to History.' })), h('button', { class: 'btn primary', text: 'Start fresh', on: { click: startFresh } })));
   const paidCount = a.transfers.filter(t => s.paid[paidKey(t.id, t.amountCents)]).length;
 
   view.append(h('div', { class: 'kpis' },
@@ -219,14 +340,15 @@ function settleView(): HTMLElement {
   if (a.transfers.length === 0) {
     view.append(group(h('div', { class: 'row empty' }, h('span', { text: 'No payments needed 🎉' }))));
   } else {
-    view.append(group(...a.transfers.map(t => {
+    view.append(group(...a.transfers.map((t, ti) => {
       const key = paidKey(t.id, t.amountCents);
       const paid = Boolean(s.paid[key]);
       return h('button', {
-        class: `row transfer ${paid ? 'paid' : ''}`,
+        class: `row transfer ${paid ? 'paid' : ''} ${animateSettle ? 'enter' : ''}`,
         attrs: { role: 'checkbox', 'aria-checked': paid, 'aria-label': `${t.fromName} pays ${t.toName} ${formatCurrency(t.amountCents)}` },
-        on: { click: () => { haptic(); togglePaid(key); } }
+        on: { click: () => { haptic(); clink(); togglePaid(key); } }
       },
+        h('i', { class: `chip-disc fly c${ti % 5}`, attrs: { 'aria-hidden': 'true', style: `--d:${ti * 90}ms` } }),
         h('span', { class: `check ${paid ? 'on' : ''}`, text: '✓' }),
         h('span', { class: 'who' },
           h('span', { class: 'bad', text: t.fromName }), h('span', { class: 'muted', text: ' pays ' }),
@@ -237,7 +359,7 @@ function settleView(): HTMLElement {
 
   view.append(header('Standings'));
   const sorted = [...a.players].sort((x, y) => y.netCents - x.netCents);
-  view.append(group(...sorted.map((p, i) => h('div', { class: 'row standing' },
+  view.append(group(...sorted.map((p, i) => h('div', { class: `row standing ${i === 0 && p.netCents > 0 ? 'gold' : ''}` },
     h('span', { class: 'rank', text: i === 0 && p.netCents > 0 ? '🏆' : String(i + 1) }),
     h('span', { class: 'grow', text: p.name }),
     h('span', { class: 'muted mono', text: formatBuyInCount(p.buyInCount) }),
@@ -251,7 +373,7 @@ function settleView(): HTMLElement {
       copyText(text);
     } } }),
     h('div', { class: 'two' },
-      h('button', { class: 'btn tinted', text: 'Save to history', on: { click: () => { saveToHistory(s.isEnded ? 'Completed & Settled' : 'Saved Snapshot'); toast('Saved to History'); } } }),
+      h('button', { class: 'btn tinted', text: 'Save to history', on: { click: () => { if (saveToHistory(s.isEnded ? 'Completed & Settled' : 'Saved Snapshot')) toast('Saved to History'); else toast('Demo sessions aren’t saved — start a fresh session', 'error'); } } }),
       h('button', { class: 'btn tinted', text: 'Download .txt', on: { click: () => download(`${safeFile(s.name)}_settlement.txt`, sessionText(s)) } })),
     ...(s.isEnded ? [] : [h('button', { class: 'btn plain block', text: 'End & settle…', on: { click: requestEnd } })])
   );
@@ -303,11 +425,19 @@ function settingsView(): HTMLElement {
     on: { click: () => setTheme(t) }
   }, h('span', { class: 'dot', attrs: { style: `background:${swatch[t]}` } }), h('span', { text: t[0].toUpperCase() + t.slice(1) })))));
 
-  view.append(header('New session'));
-  view.append(group(
-    h('button', { class: 'row action', text: 'Blank table', on: { click: () => confirmNew(() => newSession()) } }),
-    ...PRESETS.map(p => h('button', { class: 'row action', on: { click: () => confirmNew(() => newSession(p)) } },
-      h('span', { class: 'grow', text: p.label }), h('span', { class: 'muted small', text: `${p.players.length} players` })))));
+  view.append(header('Sound & feel'));
+  view.append(group(h('button', {
+    class: 'row action', attrs: { role: 'switch', 'aria-checked': state.prefs.sound },
+    on: { click: () => { const on = !state.prefs.sound; setSoundEnabled(on); setPrefs({ sound: on }); clink(); } }
+  }, h('span', { class: 'grow', text: 'Chip sounds' }), h('span', { class: `switch ${state.prefs.sound ? 'on' : ''}` }, h('i')))));
+
+  view.append(header('Sessions'));
+  view.append(group(h('button', { class: 'row action', on: { click: requestNew } },
+    h('span', { class: 'grow', text: '＋ Start a fresh session' }), h('span', { class: 'muted', text: '›' }))));
+
+  view.append(header('Try a demo', 'sample data, never saved'));
+  view.append(group(...PRESETS.map(p => h('button', { class: 'row action', on: { click: () => confirmNew(() => { newSession(p); toast('Demo loaded'); }) } },
+    h('span', { class: 'grow', text: p.label }), h('span', { class: 'muted small', text: `${p.players.length} players` })))));
 
   view.append(header('Data', state.storageOk ? 'stored on this device' : 'storage blocked'));
   const file = h('input', { attrs: { type: 'file', accept: '.txt,.json,text/plain,application/json', hidden: true }, on: { change: () => {
@@ -336,10 +466,12 @@ function settingsView(): HTMLElement {
 }
 
 function confirmNew(go: () => void) {
+  const s = state.session;
+  if (s.isDemo || s.players.length === 0) { go(); return; }
   confirmSheet({
-    title: 'Start a new session?',
+    title: 'Replace the current table?',
     message: 'The current table will be replaced. Save it to History first if you need it.',
-    confirmLabel: 'Start new session', destructive: true, onConfirm: go
+    confirmLabel: 'Load demo', destructive: true, onConfirm: go
   });
 }
 
@@ -347,9 +479,9 @@ function confirmNew(go: () => void) {
 
 const TABS: { id: Tab; label: string; icon: string }[] = [
   { id: 'table', label: 'Table', icon: '♠' },
-  { id: 'settle', label: 'Settle', icon: '⇄' },
-  { id: 'history', label: 'History', icon: '◷' },
-  { id: 'settings', label: 'Settings', icon: '⚙︎' }
+  { id: 'settle', label: 'Settle', icon: '♦' },
+  { id: 'history', label: 'History', icon: '♣' },
+  { id: 'settings', label: 'Settings', icon: '♥' }
 ];
 const TITLES: Record<Tab, string> = { table: 'Table', settle: 'Settlement', history: 'History', settings: 'Settings' };
 
@@ -362,6 +494,7 @@ function render() {
   const app = document.getElementById('app')!;
   const prev = app.querySelector('.scroll');
   const scrollTop = prev && lastTab === state.tab ? prev.scrollTop : 0;
+  animateSettle = state.tab === 'settle' && lastTab !== 'settle';
   lastTab = state.tab;
 
   const views: Record<Tab, () => HTMLElement> = { table: tableView, settle: settleView, history: historyView, settings: settingsView };
@@ -371,7 +504,9 @@ function render() {
     h('div', { class: 'large-title' },
       h('h1', { text: TITLES[state.tab] }),
       state.tab === 'table'
-        ? h('span', { class: `pill ${state.session.isEnded ? 'amber' : 'green'}`, text: state.session.isEnded ? 'Settled' : 'Live' })
+        ? h('div', { class: 'title-actions' },
+            h('span', { class: `pill ${state.session.isDemo ? 'gold' : state.session.isEnded ? 'amber' : 'green'}`, text: state.session.isDemo ? 'Demo' : state.session.isEnded ? 'Settled' : 'Live' }),
+            h('button', { class: 'new-btn', text: '＋ New', attrs: { 'aria-label': 'Start a new session' }, on: { click: requestNew } }))
         : null),
     state.tab === 'table' || state.tab === 'settle' ? h('div', { class: 'subtitle', text: state.session.name }) : null,
     views[state.tab]());
