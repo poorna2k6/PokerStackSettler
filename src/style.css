@@ -74,7 +74,7 @@ input::placeholder { color: var(--muted); } input:focus { outline: none; color: 
 .stepper span { padding: 0 6px; font-size: 13px; min-width: 84px; text-align: center; white-space: nowrap; }
 .cash { margin-left: auto; display: flex; align-items: center; gap: 6px; background: var(--card2); border-radius: 10px; padding: 0 12px; height: 36px; }
 .cash, .cash span { white-space: nowrap; }
-.cash input { width: 76px; text-align: right; font-weight: 600; }
+.cash input { width: 10ch; min-width: 0; text-align: right; font-weight: 600; }
 
 .btn { border-radius: 14px; padding: 15px 18px; font-weight: 600; text-align: center; min-height: 50px; transition: transform .08s, opacity .1s; }
 .btn:active:not(:disabled) { transform: scale(.98); opacity: .85; }
@@ -131,7 +131,9 @@ input::placeholder { color: var(--muted); } input:focus { outline: none; color: 
   .stepper button { width: 34px; }
   .stepper span.step-label { min-width: 0; flex: 1; padding: 0 2px; font-size: 11px; display: flex; flex-direction: column; align-items: center; line-height: 1.15; white-space: normal; }
   .stepper .sep { display: none; }
-  .cash { padding: 0 8px; } .cash input { width: 60px; }
+  .cash { padding: 0 8px; } .cash input { width: 9.5ch; }
+  .stepper button { width: 27px; }
+  .player-bottom { gap: 6px; }
   .kpi { padding: 10px 8px; } .kpi-value { font-size: 13px; }
 }
 .step-label b { font-weight: 600; } .step-label em { font-style: normal; }
@@ -239,3 +241,12 @@ input::placeholder { color: var(--muted); } input:focus { outline: none; color: 
 .player-top.wrapname .net { margin-left: auto; }
 .step-label.stack { display: flex; flex-direction: column; align-items: center; white-space: normal; line-height: 1.15; font-size: 11px; padding: 0 2px; min-width: 0; flex: 1; }
 .step-label.stack .sep { display: none; }
+
+/* a11y: wrap long titles, bigger invisible hit areas without changing the layout */
+.subtitle { white-space: normal; overflow-wrap: anywhere; }
+.sheet-head h2 { white-space: normal; overflow-wrap: anywhere; }
+.new-btn, .icon-btn, .link, .segmented button { position: relative; }
+.new-btn::after, .icon-btn::after, .link::after, .segmented button::after { content: ''; position: absolute; inset: -5px; }
+.link { min-height: 28px; }
+.step-label.stack { font-size: 10.5px; }
+.stepper button { position: relative; }

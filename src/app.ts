@@ -302,10 +302,11 @@ function storageNote() {
 function stepper(id: string, buyIn: number, count: number, locked: boolean, after?: () => void) {
   const unit = unitCentsFor(state.session.defaultBuyIn);
   const bump = (d: number) => () => { haptic(); clink(); rebuy(id, d); after?.(); };
+  const who = state.session.players.find(p => p.id === id)?.name ?? 'player';
   return h('div', { class: 'stepper' },
-    h('button', { text: '−', attrs: { 'aria-label': 'Remove one buy-in', 'data-fk': `minus:${id}`, disabled: locked || buyIn < unit }, on: { click: bump(-1) } }),
-    h('span', { class: `mono step-label ${`${formatBuyInCount(count)}${formatCurrency(buyIn)}`.length > 13 ? 'stack' : ''}` }, h('b', { text: formatBuyInCount(count) }), h('i', { class: 'sep', text: ' · ' }), h('em', { text: formatCurrency(buyIn) })),
-    h('button', { text: '+', attrs: { 'aria-label': 'Add one buy-in', 'data-fk': `plus:${id}`, disabled: locked }, on: { click: bump(1) } }));
+    h('button', { text: '−', attrs: { 'aria-label': `Remove one buy-in for ${who}`, 'data-fk': `minus:${id}`, disabled: locked || buyIn < unit }, on: { click: bump(-1) } }),
+    h('span', { class: `mono step-label ${`${formatBuyInCount(count)}${formatCurrency(buyIn)}`.length > 9 ? 'stack' : ''}` }, h('b', { text: formatBuyInCount(count) }), h('i', { class: 'sep', text: ' · ' }), h('em', { text: formatCurrency(buyIn) })),
+    h('button', { text: '+', attrs: { 'aria-label': `Add one buy-in for ${who}`, 'data-fk': `plus:${id}`, disabled: locked }, on: { click: bump(1) } }));
 }
 
 function confirmRemove(id: string, name: string, after?: () => void) {
@@ -669,11 +670,11 @@ function render() {
   const bar = h('nav', { class: 'tabbar', attrs: { 'aria-label': 'Main' } },
     ...TABS.map(t => h('button', {
       class: `tab ${state.tab === t.id ? 'on' : ''}`,
-      attrs: { 'aria-current': state.tab === t.id ? 'page' : undefined, 'data-fk': `tab:${t.id}` },
+      attrs: { 'aria-current': state.tab === t.id ? 'page' : undefined, 'data-fk': `tab:${t.id}`, 'aria-label': t.id === 'settle' && settleBadge ? `${t.label}, ${settleBadge} unpaid` : t.label },
       on: { click: () => setTab(t.id) }
     },
-      h('span', { class: 'tab-icon', text: t.icon }),
-      t.id === 'settle' && settleBadge ? h('span', { class: 'badge', text: String(settleBadge) }) : null,
+      h('span', { class: 'tab-icon', text: t.icon, attrs: { 'aria-hidden': 'true' } }),
+      t.id === 'settle' && settleBadge ? h('span', { class: 'badge', text: String(settleBadge), attrs: { 'aria-hidden': 'true' } }) : null,
       h('span', { class: 'tab-label', text: t.label }))));
 
   app.replaceChildren(scroll, bar);
