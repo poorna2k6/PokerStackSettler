@@ -319,7 +319,7 @@ function requestEnd() {
   if (a.players.length < 2) { toast('Add at least 2 players to settle', 'error'); return; }
   if (!a.isBalanced) {
     confirmSheet({
-      title: `Chips are off by ${formatCurrency(a.discrepancyCents, true)}`,
+      title: `Chips are ${formatCurrency(Math.abs(a.discrepancyCents))} ${a.discrepancyCents < 0 ? 'short' : 'over'}`,
       message: `Ending chips (${formatCurrency(a.totalAccountedCents)}) don't match buy-ins (${formatCurrency(a.totalBuyInCents)}).\n\nContinuing will adjust payouts so the table balances (pro-rata among winners when there are any), then lock the session.`,
       confirmLabel: 'Balance & settle', onConfirm: finishSession
     });

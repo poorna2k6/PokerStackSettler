@@ -169,8 +169,8 @@ input::placeholder { color: var(--muted); } input:focus { outline: none; color: 
 .crown { position: absolute; top: -18px; font-size: 16px; }
 .oval.tiny .seat { width: 56px; } .oval.tiny .seat-name { font-size: 10px; max-width: 56px; } .oval.tiny .avatar { width: 26px; height: 34px; } .oval.tiny .avatar b { font-size: 13px; } .oval.tiny .avatar i { font-size: 11px; } .oval.tiny .seat-net { font-size: 9px; padding: 1px 5px; }
 
-.transfer { position: relative; overflow: hidden; }
-.chip-disc.fly { position: absolute; left: 14%; top: 50%; opacity: 0; pointer-events: none; }
+.transfer { position: relative; overflow: hidden; isolation: isolate; }
+.chip-disc.fly { position: absolute; left: 14%; top: 50%; opacity: 0; pointer-events: none; z-index: -1; }
 .transfer.enter .fly { animation: slide .9s cubic-bezier(.3,.7,.3,1) var(--d, 0ms) both; }
 @keyframes slide { 0% { opacity: 0; transform: translate(0, -50%) scale(.6); } 15% { opacity: 1; } 100% { opacity: 0; transform: translate(520%, -50%) scale(1); } }
 .standing.gold { background: linear-gradient(90deg, rgba(232,197,91,.24), transparent); }
