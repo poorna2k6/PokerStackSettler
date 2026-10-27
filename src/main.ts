@@ -312,6 +312,7 @@ function openAddPlayer() {
       if (keepOpen) { name.value = ''; count.value = '1'; name.focus(); } else close();
     };
     name.addEventListener('keydown', e => { if (e.key === 'Enter') submit(true); });
+    requestAnimationFrame(() => name.focus());
     return h('div', { class: 'sheet-body' },
       group(...(unit ? [field('Buy-in unit ($)', unit)] : []), field('Name', name), h('label', { class: 'row field' }, countLabel, count)),
       h('button', { class: 'btn primary block', text: 'Add & finish', on: { click: () => submit(false) } }),
@@ -330,7 +331,7 @@ function requestEnd() {
   if (!a.isBalanced) {
     confirmSheet({
       title: `Chips are ${formatCurrency(Math.abs(a.discrepancyCents))} ${a.discrepancyCents < 0 ? 'short' : 'over'}`,
-      message: `Ending chips (${formatCurrency(a.totalAccountedCents)}) don't match buy-ins (${formatCurrency(a.totalBuyInCents)}).\n\nContinuing will adjust payouts so the table balances (pro-rata among winners when there are any), then lock the session.`,
+      message: `${a.totalPlayerCashOutCents === 0 ? 'No ending chips have been entered yet.\n\n' : ''}Ending chips (${formatCurrency(a.totalAccountedCents)}) don't match buy-ins (${formatCurrency(a.totalBuyInCents)}).\n\nContinuing will adjust payouts so the table balances (pro-rata among winners when there are any), then lock the session.`,
       confirmLabel: 'Balance & settle', onConfirm: finishSession
     });
     return;
@@ -401,7 +402,7 @@ function settleView(): HTMLElement {
       copyText(text);
     } } }),
     h('div', { class: 'two' },
-      h('button', { class: 'btn tinted', text: 'Save to history', on: { click: () => { if (saveToHistory(s.isEnded ? 'Completed & Settled' : 'Saved Snapshot')) toast('Saved to History'); else toast('Demo sessions aren’t saved — start a fresh session', 'error'); } } }),
+      h('button', { class: 'btn tinted', text: 'Save to history', on: { click: () => { if (saveToHistory(s.isEnded ? 'Completed & Settled' : 'Saved Snapshot')) toast('Saved to History'); else toast('Demo data isn’t saved — start fresh', 'error'); } } }),
       h('button', { class: 'btn tinted', text: 'Download .txt', on: { click: () => download(`${safeFile(s.name)}_settlement.txt`, sessionText(s)) } })),
     ...(s.isEnded ? [] : [h('button', { class: 'btn plain block', text: 'End & settle…', attrs: { disabled: a.players.length < 2 }, on: { click: requestEnd } })])
   );

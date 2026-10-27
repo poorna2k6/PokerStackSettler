@@ -1,6 +1,6 @@
 :root {
   --bg: #000; --card: #1c1c1e; --card2: #2c2c2e; --line: rgba(255,255,255,.12);
-  --text: #fff; --muted: #8e8e93; --accent: #30d158; --accent-ink: #00230c;
+  --text: #fff; --muted: #9c9ca3; --accent: #30d158; --accent-ink: #00230c;
   --good: #30d158; --bad: #ff6961; --warn: #ffd60a; --house: #a5b4fc;
   --bar: rgba(28,28,30,.82); --tint: rgba(48,209,88,.16); --gold: #d4af37;
   --sat: env(safe-area-inset-top); --sab: env(safe-area-inset-bottom);
@@ -83,7 +83,7 @@ input::placeholder { color: var(--muted); } input:focus { outline: none; color: 
 
 .transfer .who { flex: 1; min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
 .transfer .amt { font-weight: 700; }
-.transfer.paid { opacity: .6; } .transfer.paid .amt { text-decoration: line-through; }
+.transfer.paid .amt { text-decoration: line-through; } .transfer.paid .who span { color: var(--muted); }
 .check { width: 26px; height: 26px; border-radius: 50%; border: 2px solid var(--muted); color: transparent; display: grid; place-items: center; font-size: 14px; font-weight: 800; flex-shrink: 0; transition: .15s; }
 .check.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 .standing { gap: 12px; } .rank { width: 24px; text-align: center; color: var(--muted); font-weight: 700; }
@@ -157,9 +157,11 @@ input::placeholder { color: var(--muted); } input:focus { outline: none; color: 
 .oval { position: relative; width: 100%; aspect-ratio: 5 / 6; max-height: 70dvh; margin: 8px auto 0; border-radius: 50% / 46%;
   background: radial-gradient(ellipse at 50% 40%, rgba(255,255,255,.14), transparent 65%), #0f5a3d;
   border: 10px solid #3a2414; box-shadow: 0 0 0 2px var(--gold), inset 0 0 40px rgba(0,0,0,.5), 0 10px 30px rgba(0,0,0,.45); }
-[data-theme='light'] .oval { background: #2f9467; }
+/* The oval is always dark green, so its text colours are fixed regardless of theme. */
+.oval { --good: #5eea8f; --bad: #ff9a90; --muted: #cfe3d8; --gold: #f0cf6a; }
+.oval .seat-name, .oval .crown { color: #fff; }
 .oval-center { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; color: #fff; pointer-events: none; }
-.oval-center .kpi-label { color: rgba(255,255,255,.7); } .pot { font-size: 24px; font-weight: 700; color: var(--gold); }
+.oval-center .kpi-label { color: #dcebe3; } .pot { font-size: 24px; font-weight: 700; color: var(--gold); }
 .seat { position: absolute; transform: translate(-50%, -50%); display: flex; flex-direction: column; align-items: center; gap: 2px; width: 78px; text-align: center; color: #fff; }
 .seat:active { transform: translate(-50%, -50%) scale(.95); }
 .seat-name { font-size: 12px; font-weight: 700; max-width: 78px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-shadow: 0 1px 3px rgba(0,0,0,.7); }

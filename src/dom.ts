@@ -57,7 +57,18 @@ export function openSheet(title: string, build: (close: () => void) => Node): Sh
   const previous = document.activeElement as HTMLElement | null;
   const backdrop = h('div', { class: 'backdrop' });
   const sheet = h('div', { class: 'sheet', attrs: { role: 'dialog', 'aria-modal': 'true', 'aria-label': title } });
-  const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') close(); };
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') { close(); return; }
+    // Keep Tab focus inside the topmost sheet.
+    if (e.key !== 'Tab' || root.lastElementChild !== sheet) return;
+    const items = [...sheet.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])')];
+    if (items.length === 0) return;
+    const first = items[0];
+    const last = items[items.length - 1];
+    const active = document.activeElement as HTMLElement | null;
+    if (e.shiftKey && (active === first || !sheet.contains(active))) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && (active === last || !sheet.contains(active))) { e.preventDefault(); first.focus(); }
+  };
   const close = () => {
     document.removeEventListener('keydown', onKey);
     sheet.classList.remove('in');
