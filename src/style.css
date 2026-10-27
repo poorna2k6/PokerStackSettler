@@ -58,6 +58,8 @@ button:disabled, input:disabled { opacity: .45; cursor: default; }
 .field span { flex: 1; } .field input { flex: 1.3; text-align: right; }
 input { font: inherit; color: inherit; background: transparent; border: 0; min-width: 0; padding: 0; }
 input::placeholder { color: var(--muted); } input:focus { outline: none; color: var(--accent); }
+.row.field:focus-within, .cash:focus-within, .segmented button:focus-visible { box-shadow: inset 0 0 0 2px var(--accent); }
+.cash:focus-within { border-radius: 10px; }
 
 .player { flex-direction: column; align-items: stretch; gap: 8px; }
 .player-top, .player-bottom { display: flex; align-items: center; gap: 10px; }

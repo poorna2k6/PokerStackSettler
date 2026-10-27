@@ -59,11 +59,11 @@ function field(label: string, input: HTMLInputElement) {
   return h('label', { class: 'row field' }, h('span', { text: label }), input);
 }
 
-function textInput(value: string, onChange: (v: string) => void, opts: { disabled?: boolean; mode?: string; placeholder?: string; label?: string } = {}) {
+function textInput(value: string, onChange: (v: string) => void, opts: { disabled?: boolean; mode?: string; placeholder?: string; label?: string; fk?: string } = {}) {
   const el = h('input', {
     attrs: {
       type: 'text', inputmode: opts.mode, value, placeholder: opts.placeholder, disabled: opts.disabled,
-      'aria-label': opts.label, autocomplete: 'off', autocapitalize: opts.mode ? 'off' : 'words', enterkeyhint: 'done'
+      'aria-label': opts.label, 'data-fk': opts.fk, autocomplete: 'off', autocapitalize: opts.mode ? 'off' : 'words', enterkeyhint: 'done'
     },
     on: { change: () => onChange(el.value), focus: () => el.select() }
   });
@@ -141,7 +141,7 @@ function tableView(): HTMLElement {
   const seg = h('div', { class: 'segmented', attrs: { role: 'tablist', 'aria-label': 'Player view' } },
     ...(['list', 'table'] as const).map(v => h('button', {
       text: v === 'list' ? 'List' : 'Table',
-      attrs: { role: 'tab', 'aria-selected': state.prefs.view === v },
+      attrs: { role: 'tab', 'aria-selected': state.prefs.view === v, 'data-fk': `seg:${v}` },
       class: state.prefs.view === v ? 'on' : '',
       on: { click: () => setPrefs({ view: v }) }
     })));
@@ -165,7 +165,7 @@ function tableView(): HTMLElement {
   view.append(group(
     field('Name', textInput(s.name, setName, { disabled: locked, label: 'Session name' })),
     field('Buy-in unit ($)', textInput(String(s.defaultBuyIn), changeUnit, { disabled: locked, mode: 'decimal', label: 'Buy-in unit' })),
-    field('Rake / expense ($)', textInput(money(s.expenseCents), setExpense, { disabled: locked, mode: 'decimal', label: 'Expense pot' }))
+    field('Rake ($)', textInput(money(s.expenseCents), setExpense, { disabled: locked, mode: 'decimal', label: 'Expense pot' }))
   ));
 
   view.append(
@@ -242,9 +242,9 @@ function stepper(id: string, buyIn: number, count: number, locked: boolean, afte
   const unit = unitCentsFor(state.session.defaultBuyIn);
   const bump = (d: number) => () => { haptic(); clink(); rebuy(id, d); after?.(); };
   return h('div', { class: 'stepper' },
-    h('button', { text: '−', attrs: { 'aria-label': 'Remove one buy-in', disabled: locked || buyIn < unit }, on: { click: bump(-1) } }),
+    h('button', { text: '−', attrs: { 'aria-label': 'Remove one buy-in', 'data-fk': `minus:${id}`, disabled: locked || buyIn < unit }, on: { click: bump(-1) } }),
     h('span', { class: 'mono', text: `${formatBuyInCount(count)} · ${formatCurrency(buyIn)}` }),
-    h('button', { text: '+', attrs: { 'aria-label': 'Add one buy-in', disabled: locked }, on: { click: bump(1) } }));
+    h('button', { text: '+', attrs: { 'aria-label': 'Add one buy-in', 'data-fk': `plus:${id}`, disabled: locked }, on: { click: bump(1) } }));
 }
 
 function confirmRemove(id: string, name: string, after?: () => void) {
@@ -288,7 +288,7 @@ function openRenameSheet(id: string) {
 }
 
 function playerRow(i: number, id: string, name: string, buyIn: number, cashOut: number, count: number, net: number, locked: boolean) {
-  const cash = textInput(money(cashOut), v => updatePlayer(id, { cashOutCents: Math.max(0, toCents(v)) }), { disabled: locked, mode: 'decimal', label: `${name} ending chips` });
+  const cash = textInput(money(cashOut), v => updatePlayer(id, { cashOutCents: Math.max(0, toCents(v)) }), { disabled: locked, mode: 'decimal', label: `${name} ending chips`, fk: `cash:${id}` });
   cash.classList.add('mono');
   const tone = net > 0 ? 'good' : net < 0 ? 'bad' : 'muted';
   return h('div', { class: 'row player' },
@@ -371,7 +371,7 @@ function requestEnd() {
   if (!a.isBalanced) {
     confirmSheet({
       title: `Chips are ${formatCurrency(Math.abs(a.discrepancyCents))} ${a.discrepancyCents < 0 ? 'short' : 'over'}`,
-      message: `${a.totalPlayerCashOutCents === 0 ? 'No ending chips have been entered yet.\n\n' : ''}Ending chips (${formatCurrency(a.totalAccountedCents)}) don't match buy-ins (${formatCurrency(a.totalBuyInCents)}).\n\nContinuing will adjust payouts so the table balances (pro-rata among winners when there are any), then lock the session.`,
+      message: `${a.totalPlayerCashOutCents === 0 ? 'No ending chips have been entered yet.\n\n' : ''}Ending chips (${formatCurrency(a.totalAccountedCents)}) don't match buy-ins (${formatCurrency(a.totalBuyInCents)}).\n\nContinuing will adjust payouts so the table balances (pro-rata among winners, or equally if nobody is ahead), then lock the session.`,
       confirmLabel: 'Balance & settle', onConfirm: finishSession
     });
     return;
@@ -413,7 +413,7 @@ function settleView(): HTMLElement {
       const paid = Boolean(s.paid[key]);
       return h('button', {
         class: `row transfer ${paid ? 'paid' : ''} ${animateSettle ? 'enter' : ''}`,
-        attrs: { role: 'checkbox', 'aria-checked': paid, 'aria-label': `${t.fromName} pays ${t.toName} ${formatCurrency(t.amountCents)}` },
+        attrs: { role: 'checkbox', 'data-fk': `transfer:${key}`, 'aria-checked': paid, 'aria-label': `${t.fromName} pays ${t.toName} ${formatCurrency(t.amountCents)}` },
         on: { click: () => { haptic(); clink(); togglePaid(key); } }
       },
         h('i', { class: `chip-disc fly c${ti % 5}`, attrs: { 'aria-hidden': 'true', style: `--d:${ti * 90}ms` } }),
@@ -490,7 +490,7 @@ function settingsView(): HTMLElement {
   view.append(header('Appearance'));
   view.append(h('div', { class: 'themes' }, ...THEMES.map(t => h('button', {
     class: `theme ${state.theme === t ? 'on' : ''}`,
-    attrs: { 'aria-pressed': state.theme === t, 'aria-label': `${t} theme` },
+    attrs: { 'aria-pressed': state.theme === t, 'aria-label': `${t} theme`, 'data-fk': `theme:${t}` },
     on: { click: () => setTheme(t) }
   }, h('span', { class: 'dot', attrs: { style: `background:${swatch[t]}` } }), h('span', { text: t[0].toUpperCase() + t.slice(1) })))));
 
@@ -594,7 +594,7 @@ function render() {
   const bar = h('nav', { class: 'tabbar', attrs: { 'aria-label': 'Main' } },
     ...TABS.map(t => h('button', {
       class: `tab ${state.tab === t.id ? 'on' : ''}`,
-      attrs: { 'aria-current': state.tab === t.id ? 'page' : undefined },
+      attrs: { 'aria-current': state.tab === t.id ? 'page' : undefined, 'data-fk': `tab:${t.id}` },
       on: { click: () => setTab(t.id) }
     },
       h('span', { class: 'tab-icon', text: t.icon }),
@@ -605,5 +605,39 @@ function render() {
   scroll.scrollTop = scrollTop;
 }
 
-subscribe(render);
+// ---------------------------------------------------------------- focus continuity
+// render() rebuilds the whole screen, which would drop keyboard focus to <body>. We remember the
+// last focused control (by a stable key) and put focus back, or on the next control after Tab.
+
+const fkOf = (el: Element) =>
+  (el as HTMLElement).dataset?.fk ?? `${el.tagName}|${el.getAttribute('aria-label') ?? ''}|${(el.textContent ?? '').trim().slice(0, 40)}`;
+let lastFocus: string | null = null;
+let tabDir = 0;
+
+document.addEventListener('focusin', e => {
+  const t = e.target;
+  if (t instanceof HTMLElement && t !== document.body && !t.closest('#sheets')) lastFocus = fkOf(t);
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Tab') tabDir = e.shiftKey ? -1 : 1;
+}, true);
+
+function restoreFocus() {
+  const dir = tabDir;
+  tabDir = 0;
+  if (!lastFocus || document.querySelector('#sheets .sheet')) return;
+  const app = document.getElementById('app')!;
+  const active = document.activeElement;
+  if (active && active !== document.body && app.contains(active)) return;
+  const items = [...app.querySelectorAll<HTMLElement>('button, input')].filter(
+    el => !(el as HTMLButtonElement).disabled && !(el as HTMLInputElement).hidden && el.offsetParent !== null
+  );
+  let i = items.findIndex(el => fkOf(el) === lastFocus);
+  if (i < 0) return;
+  if (dir !== 0) i = Math.min(items.length - 1, Math.max(0, i + dir));
+  items[i].focus({ preventScroll: dir === 0 });
+}
+
+const renderAndKeepFocus = () => { render(); restoreFocus(); requestAnimationFrame(restoreFocus); };
+subscribe(renderAndKeepFocus);
 render();
