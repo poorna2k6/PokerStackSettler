@@ -304,7 +304,7 @@ function stepper(id: string, buyIn: number, count: number, locked: boolean, afte
   const bump = (d: number) => () => { haptic(); clink(); rebuy(id, d); after?.(); };
   return h('div', { class: 'stepper' },
     h('button', { text: '−', attrs: { 'aria-label': 'Remove one buy-in', 'data-fk': `minus:${id}`, disabled: locked || buyIn < unit }, on: { click: bump(-1) } }),
-    h('span', { class: 'mono step-label' }, h('b', { text: formatBuyInCount(count) }), h('i', { class: 'sep', text: ' · ' }), h('em', { text: formatCurrency(buyIn) })),
+    h('span', { class: `mono step-label ${`${formatBuyInCount(count)}${formatCurrency(buyIn)}`.length > 13 ? 'stack' : ''}` }, h('b', { text: formatBuyInCount(count) }), h('i', { class: 'sep', text: ' · ' }), h('em', { text: formatCurrency(buyIn) })),
     h('button', { text: '+', attrs: { 'aria-label': 'Add one buy-in', 'data-fk': `plus:${id}`, disabled: locked }, on: { click: bump(1) } }));
 }
 
@@ -353,7 +353,7 @@ function playerRow(i: number, id: string, name: string, buyIn: number, cashOut: 
   cash.classList.add('mono');
   const tone = net > 0 ? 'good' : net < 0 ? 'bad' : 'muted';
   return h('div', { class: 'row player' },
-    h('div', { class: 'player-top' },
+    h('div', { class: `player-top ${name.length > 14 ? 'wrapname' : ''}` },
       avatar(i, name),
       h('div', { class: 'player-name' },
         h('span', { class: 'player-name-text', text: name }),

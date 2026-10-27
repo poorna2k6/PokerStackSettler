@@ -231,3 +231,11 @@ input::placeholder { color: var(--muted); } input:focus { outline: none; color: 
 .subtitle.wrap { white-space: normal; overflow-wrap: anywhere; }
 .viewer-bar button.link { min-height: 44px; min-width: 72px; padding: 0 6px; }
 .viewer-status.ok { color: var(--good); }
+
+/* long names get their own line at every width; long stepper labels stack */
+.player-top.wrapname { flex-wrap: wrap; row-gap: 4px; }
+.player-top.wrapname .player-name { flex: 1 1 calc(100% - 40px); }
+.player-top.wrapname .player-name-text { white-space: normal; overflow-wrap: anywhere; }
+.player-top.wrapname .net { margin-left: auto; }
+.step-label.stack { display: flex; flex-direction: column; align-items: center; white-space: normal; line-height: 1.15; font-size: 11px; padding: 0 2px; min-width: 0; flex: 1; }
+.step-label.stack .sep { display: none; }

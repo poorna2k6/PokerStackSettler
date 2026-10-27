@@ -7,7 +7,7 @@ registerSW({ immediate: true });
 // A "#/v/CODE" link opens the read-only live view. That path never loads the host app, so it cannot
 // touch (or overwrite) any table saved on this device.
 const safeDecode = (s: string) => { try { return decodeURIComponent(s); } catch { return s; } };
-const viewing = location.hash.startsWith('#/v/') ? [location.hash, safeDecode(location.hash.slice(4, 204))] : null;
+const viewing = /^#\/v(\/|$)/.test(location.hash) ? [location.hash, safeDecode(location.hash.slice(4, 204).split(/[?&#]/)[0])] : null;
 window.addEventListener('hashchange', () => location.reload());
 
 if (viewing) {
