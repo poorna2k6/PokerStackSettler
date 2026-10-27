@@ -124,11 +124,17 @@ export function saveToHistory(status = 'Saved Snapshot'): SavedSession | null {
   return snap;
 }
 
-/** Locks the session; when chips don't match, balances them pro-rata first. */
-export function endSession() {
+/**
+ * Locks the session; when chips don't match, balances them pro-rata first.
+ * Returns false (and leaves the session open) if the table cannot be balanced,
+ * e.g. the expense pot is larger than everything that was bought in.
+ */
+export function endSession(): boolean {
   if (!audit().isBalanced) applyReconcile('proRataWinners');
+  if (!audit().isBalanced) return false;
   state.session.isEnded = true;
   if (state.session.isDemo) commit(); else saveToHistory('Completed & Settled');
+  return true;
 }
 export function reopenSession() { state.session.isEnded = false; commit(); }
 

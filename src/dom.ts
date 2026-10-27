@@ -19,7 +19,10 @@ export function h<K extends keyof HTMLElementTagNameMap>(
   if (props?.text !== undefined) el.textContent = props.text;
   if (props?.attrs) {
     for (const [k, v] of Object.entries(props.attrs)) {
-      if (v === undefined || v === false) continue;
+      if (v === undefined) continue;
+      // aria-* states need explicit "true"/"false"; other boolean attrs (disabled, hidden) are presence-only.
+      if (typeof v === 'boolean' && k.startsWith('aria-')) { el.setAttribute(k, String(v)); continue; }
+      if (v === false) continue;
       el.setAttribute(k, v === true ? '' : String(v));
     }
   }

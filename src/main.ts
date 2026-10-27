@@ -106,7 +106,7 @@ function tableView(): HTMLElement {
   view.append(
     h('div', { class: 'kpis' },
       kpi('Players', String(a.players.length)),
-      kpi('Pot', formatCurrency(a.totalBuyInCents), formatBuyInCount(a.totalBuyInCount)),
+      kpi('Pot', formatCurrency(a.totalBuyInCents), `${a.totalBuyInCount} buy-in${a.totalBuyInCount === 1 ? '' : 's'}`),
       kpi('Chips out', formatCurrency(a.totalAccountedCents), a.isBalanced ? 'Balanced ✓' : formatCurrency(a.discrepancyCents, true), a.isBalanced ? 'good' : 'warn'))
   );
 
@@ -301,20 +301,25 @@ function openAddPlayer() {
   });
 }
 
+function finishSession() {
+  if (endSession()) { setTab('settle'); toast('Session settled'); }
+  else toast('Can’t balance this table — check the rake/expense amount', 'error');
+}
+
 function requestEnd() {
   const a = audit();
   if (!a.isBalanced) {
     confirmSheet({
       title: `Chips are off by ${formatCurrency(a.discrepancyCents, true)}`,
-      message: `Ending chips (${formatCurrency(a.totalAccountedCents)}) don't match buy-ins (${formatCurrency(a.totalBuyInCents)}).\n\nContinuing will adjust winners' payouts pro-rata so the table balances, then lock the session.`,
-      confirmLabel: 'Balance & settle', onConfirm: () => { endSession(); setTab('settle'); toast('Session settled'); }
+      message: `Ending chips (${formatCurrency(a.totalAccountedCents)}) don't match buy-ins (${formatCurrency(a.totalBuyInCents)}).\n\nContinuing will adjust payouts so the table balances (pro-rata among winners when there are any), then lock the session.`,
+      confirmLabel: 'Balance & settle', onConfirm: finishSession
     });
     return;
   }
   confirmSheet({
     title: 'End & settle?',
     message: `${a.players.length} players · ${formatCurrency(a.totalBuyInCents)} pot · ${a.transfers.length} transfer${a.transfers.length === 1 ? '' : 's'}.\n\nThe session will be saved to History and locked.`,
-    confirmLabel: 'End session', onConfirm: () => { endSession(); setTab('settle'); toast('Session settled'); }
+    confirmLabel: 'End session', onConfirm: finishSession
   });
 }
 
@@ -498,7 +503,7 @@ function render() {
   lastTab = state.tab;
 
   const views: Record<Tab, () => HTMLElement> = { table: tableView, settle: settleView, history: historyView, settings: settingsView };
-  const settleBadge = audit().transfers.length;
+  const settleBadge = audit().transfers.filter(t => !state.session.paid[paidKey(t.id, t.amountCents)]).length;
 
   const scroll = h('main', { class: 'scroll' },
     h('div', { class: 'large-title' },
