@@ -43,6 +43,8 @@ export const state: State = {
   storageOk: true,
   lastSave: ''
 };
+// Probe storage once at startup so a blocked browser is flagged before the first edit.
+state.storageOk = saveLive(state.session);
 
 type Listener = () => void;
 const listeners: Listener[] = [];
@@ -188,7 +190,7 @@ export function importBackup(text: string): string | null {
     state.saved = [...added, ...state.saved];
     state.storageOk = saveVault(state.saved) && state.storageOk;
     commit();
-    return `Imported ${added.length} session${added.length === 1 ? '' : 's'}`;
+    return added.length === 0 ? 'Those sessions are already in History' : `Imported ${added.length} session${added.length === 1 ? '' : 's'}`;
   }
   const s = parsed.session;
   state.session = {
