@@ -1,7 +1,7 @@
 import '@fontsource/playfair-display/latin-700.css';
 import './style.css';
 import { registerSW } from 'virtual:pwa-register';
-import { h, haptic, openSheet, confirmSheet, toast } from './dom';
+import { h, haptic, openSheet, confirmSheet, setFocusFallback, toast } from './dom';
 import { clink, setSoundEnabled } from './sound';
 import {
   buildReceipt, formatBuyInCount, formatUnit, parseBackup, MAX_UNIT, MIN_UNIT, type Audit, formatCurrency, leaderboard, toCents, unitCentsFor,
@@ -612,31 +612,54 @@ function render() {
 const fkOf = (el: Element) =>
   (el as HTMLElement).dataset?.fk ?? `${el.tagName}|${el.getAttribute('aria-label') ?? ''}|${(el.textContent ?? '').trim().slice(0, 40)}`;
 let lastFocus: string | null = null;
+let lastIndex = 0;
+let lastTabId: Tab | null = null;
 let tabDir = 0;
+let tabTimer: number | undefined;
+
+const focusables = () =>
+  [...document.getElementById('app')!.querySelectorAll<HTMLElement>('button, input')].filter(
+    el => !(el as HTMLButtonElement).disabled && !(el as HTMLInputElement).hidden && el.offsetParent !== null
+  );
 
 document.addEventListener('focusin', e => {
   const t = e.target;
-  if (t instanceof HTMLElement && t !== document.body && !t.closest('#sheets')) lastFocus = fkOf(t);
+  if (t instanceof HTMLElement && t !== document.body && !t.closest('#sheets')) {
+    lastFocus = fkOf(t);
+    lastIndex = Math.max(0, focusables().indexOf(t));
+  }
 });
+// The Tab direction only matters for the re-render that the Tab itself triggers (an input committing on blur),
+// so it expires quickly; otherwise a later Enter/Space on a control would wrongly push focus forward.
 document.addEventListener('keydown', e => {
-  if (e.key === 'Tab') tabDir = e.shiftKey ? -1 : 1;
+  if (e.key !== 'Tab') { tabDir = 0; return; }
+  tabDir = e.shiftKey ? -1 : 1;
+  clearTimeout(tabTimer);
+  tabTimer = window.setTimeout(() => { tabDir = 0; }, 80);
 }, true);
 
 function restoreFocus() {
   const dir = tabDir;
-  tabDir = 0;
   if (!lastFocus || document.querySelector('#sheets .sheet')) return;
   const app = document.getElementById('app')!;
   const active = document.activeElement;
-  if (active && active !== document.body && app.contains(active)) return;
-  const items = [...app.querySelectorAll<HTMLElement>('button, input')].filter(
-    el => !(el as HTMLButtonElement).disabled && !(el as HTMLInputElement).hidden && el.offsetParent !== null
-  );
-  let i = items.findIndex(el => fkOf(el) === lastFocus);
-  if (i < 0) return;
-  if (dir !== 0) i = Math.min(items.length - 1, Math.max(0, i + dir));
+  if (active && active !== document.body && app.contains(active)) { lastTabId = state.tab; return; }
+  const items = focusables();
+  if (items.length === 0) return;
+  const tabChanged = lastTabId !== null && lastTabId !== state.tab;
+  lastTabId = state.tab;
+  let i = tabChanged ? -1 : items.findIndex(el => fkOf(el) === lastFocus);
+  if (i < 0 && !tabChanged && lastFocus.startsWith('minus:')) {
+    i = items.findIndex(el => el.dataset.fk === `plus:${lastFocus!.slice(6)}`); // "−" became disabled: use its "+"
+  }
+  if (tabChanged) {
+    i = items.findIndex(el => el.dataset.fk === `tab:${state.tab}`);
+  }
+  if (i < 0) i = Math.min(lastIndex, items.length - 1); // control vanished: stay at the same position
+  if (dir !== 0 && fkOf(items[i]) === lastFocus) i = Math.min(items.length - 1, Math.max(0, i + dir));
   items[i].focus({ preventScroll: dir === 0 });
 }
+setFocusFallback(restoreFocus);
 
 const renderAndKeepFocus = () => { render(); restoreFocus(); requestAnimationFrame(restoreFocus); };
 subscribe(renderAndKeepFocus);

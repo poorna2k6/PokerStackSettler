@@ -51,6 +51,10 @@ export function toast(message: string, kind: 'ok' | 'error' = 'ok') {
 
 export interface SheetHandle { close(): void }
 
+/** Called when a sheet closes and the control that opened it no longer exists (the screen was re-rendered). */
+let focusFallback: (() => void) | undefined;
+export const setFocusFallback = (fn: () => void) => { focusFallback = fn; };
+
 /** Bottom sheet. `build` receives a close function and returns the body. */
 export function openSheet(title: string, build: (close: () => void) => Node): SheetHandle {
   const root = document.getElementById('sheets')!;
@@ -77,7 +81,9 @@ export function openSheet(title: string, build: (close: () => void) => Node): Sh
       sheet.remove();
       backdrop.remove();
       // Hand focus back only when no other sheet took over (e.g. confirm -> rename sheet).
-      if (!root.querySelector('.sheet')) previous?.focus?.();
+      if (root.querySelector('.sheet')) return;
+      if (previous?.isConnected) previous.focus();
+      else focusFallback?.();
     }, 220);
   };
   sheet.append(
