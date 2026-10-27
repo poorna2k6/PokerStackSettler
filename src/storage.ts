@@ -1,3 +1,4 @@
+import { normalizeCode } from './shared';
 import { sanitizeBuyIn, sanitizePaid, sanitizePlayers, sanitizeSaved, toCents, uniqueSessionIds, type SavedSession, type SessionData } from './engine';
 
 const VAULT_KEY = 'stacksettle_pro_vault_v2';
@@ -34,6 +35,14 @@ export function loadTheme(): Theme {
 }
 export const saveTheme = (t: Theme) => write(THEME_KEY, t);
 
+function parseShare(raw: unknown): SessionData['share'] {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const o = raw as Record<string, unknown>;
+  const code = normalizeCode(o.code);
+  const key = typeof o.hostKey === 'string' && o.hostKey.length >= 16 && o.hostKey.length <= 200 ? o.hostKey : null;
+  return code && key ? { code, hostKey: key } : undefined;
+}
+
 /** Reads the live session. Also understands the v1 single-file app's format. */
 export function loadLive(): SessionData | null {
   const o = read(LIVE_KEY) as Record<string, unknown> | null;
@@ -50,6 +59,7 @@ export function loadLive(): SessionData | null {
     expenseCents,
     isEnded: o.isEnded === true,
     isDemo: o.isDemo === true,
+    share: parseShare(o.share),
     players,
     paid
   };
@@ -58,7 +68,7 @@ export function loadLive(): SessionData | null {
 export const saveLive = (s: SessionData) =>
   write(LIVE_KEY, {
     id: s.id, name: s.name, defaultBuyIn: s.defaultBuyIn, expenseCents: s.expenseCents,
-    isEnded: s.isEnded, isDemo: s.isDemo === true, players: s.players, paid: s.paid
+    isEnded: s.isEnded, isDemo: s.isDemo === true, share: s.share, players: s.players, paid: s.paid
   });
 
 export function loadVault(): SavedSession[] {

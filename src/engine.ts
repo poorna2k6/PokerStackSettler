@@ -299,7 +299,7 @@ export function reconcile(
 
 const MAX_CENTS = 1_000_000_00; // $1,000,000 per player — rejects absurd/hostile values
 
-function safeCents(v: unknown): number {
+export function safeCents(v: unknown): number {
   const n = typeof v === 'number' ? v : Number(v);
   if (!Number.isFinite(n)) return 0;
   return Math.min(MAX_CENTS, Math.max(0, Math.round(n)));
@@ -333,6 +333,8 @@ export interface SessionData {
   isEnded: boolean;
   /** true while showing built-in demo data; demo sessions are never saved to History */
   isDemo?: boolean;
+  /** present while the host is sharing a live view-only link for this session */
+  share?: { code: string; hostKey: string };
   players: Player[];
   paid: Record<string, boolean>;
 }
