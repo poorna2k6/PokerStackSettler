@@ -366,3 +366,29 @@ describe('extra expenses (food, drinks)', () => {
     expect(back?.kind === 'session' && back.session.bills?.[0].cents).toBe(3000);
   });
 });
+
+describe('expense shared by a chosen list', () => {
+  const pl = (id: string) => ({ id, name: id.toUpperCase(), buyInCents: 10000, cashOutCents: 10000 });
+  it('splits only between the ticked people; payer need not be one of them', () => {
+    const a = solve([pl('a'), pl('b'), pl('c')], 0, 100, [{ id: '1', label: 'Beer', cents: 1000, payerId: 'a', sharedBy: ['b', 'c'] }]);
+    expect(a.players.map(p => p.shareCents)).toEqual([0, 500, 500]);
+    expect(a.players.map(p => p.finalCents)).toEqual([1000, -500, -500]);
+    expect(a.isBalanced).toBe(true);
+  });
+  it('mixes pooled and chosen expenses, and stays zero-sum', () => {
+    const bills = [
+      { id: '1', label: 'Pizza', cents: 3000, payerId: 'a' },
+      { id: '2', label: 'Beer', cents: 1001, guest: 'Sam', sharedBy: ['b', 'guest:sam'] }
+    ];
+    const a = solve([pl('a'), pl('b'), pl('c')], 0, 100, bills);
+    expect(a.players.map(p => p.shareCents)).toEqual([1000, 1000 + 501, 1000]);
+    expect(a.guests[0].shareCents).toBe(500);
+    const total = a.players.reduce((x, p) => x + p.finalCents, 0) + a.guests.reduce((x, g) => x + g.finalCents, 0);
+    expect(total).toBe(0);
+  });
+  it('an unknown or empty list falls back to everyone, and ids are cleaned', () => {
+    const a = solve([pl('a'), pl('b')], 0, 100, [{ id: '1', label: 'x', cents: 1000, payerId: 'a', sharedBy: ['ghost'] }]);
+    expect(a.players.map(p => p.shareCents)).toEqual([500, 500]);
+    expect(sanitizeBills([{ cents: 100, guest: 'g', sharedBy: ['a', 'a', 5, ''] }])[0].sharedBy).toEqual(['a']);
+  });
+});

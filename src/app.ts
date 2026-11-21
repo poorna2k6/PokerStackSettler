@@ -5,6 +5,7 @@ import { SHARE_TTL_CHOICES, SHARE_TTL_SECONDS, formatCode, normalizeCode } from 
 import { openHandsSheet } from './hands';
 import { askExtraExpenses, openExpenses, previewLines } from './expenses';
 import { openHandoverSheet } from './handover';
+import { renderQr } from './qr';
 import { drawSettlement, sharePicture } from './picture';
 import { setShareTtl, shareUrl, startSharing, stopSharing, sync } from './sync';
 import {
@@ -249,6 +250,8 @@ function openShareSheet() {
           if (navigator.share) { try { await navigator.share({ title: state.session.name, text: 'Watch our poker game live', url }); return; } catch (e) { if ((e as Error).name === 'AbortError') return; } }
           await copyText(url);
         } } }),
+        h('div', { class: 'qr-box' }, renderQr(url, 'QR code for the view-only link')),
+        h('p', { class: 'muted small center', text: 'Scan to watch live.' }),
         h('div', { class: 'two' },
           h('button', { class: 'btn tinted', text: 'Copy link', on: { click: () => copyText(url) } }),
           h('button', { class: 'btn tinted', text: 'Copy code', on: { click: () => copyText(formatCode(share.code)) } })),

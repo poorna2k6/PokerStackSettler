@@ -18,7 +18,7 @@ export function openExpenses(onDone?: () => void) {
       const locked = s.isEnded;
       const a = audit();
       body.replaceChildren(
-        h('p', { class: 'muted small', text: 'Food, drinks or anything else paid by a player — or by someone who isn’t playing. The total is split equally between all players and added to who pays whom. Chips and poker results are not changed.' }),
+        h('p', { class: 'muted small', text: 'Food, drinks or anything else paid by a player — or by someone who isn’t playing. Each expense is split equally between the people you choose (everyone by default) and added to who pays whom. Chips and poker results are not changed.' }),
         bills.length === 0
           ? group(h('div', { class: 'row empty' }, h('span', { text: 'No extra expenses yet.' })))
           : group(
@@ -26,10 +26,10 @@ export function openExpenses(onDone?: () => void) {
               class: 'row action', attrs: { 'data-fk': `bill:${b.id}`, 'aria-label': `${b.label}, ${formatCurrency(b.cents)}, paid by ${payerName(b)}${locked ? '' : ', edit'}`, disabled: locked },
               on: { click: () => openBillForm(b.id) }
             },
-              h('span', { class: 'grow' }, h('strong', { text: b.label }), h('div', { class: 'muted small', text: `paid by ${payerName(b)}` })),
+              h('span', { class: 'grow' }, h('strong', { text: b.label }), h('div', { class: 'muted small', text: `paid by ${payerName(b)} · ${b.sharedBy?.length ? `shared by ${b.sharedBy.length}` : 'everyone'}` })),
               h('span', { class: 'mono', text: formatCurrency(b.cents) }))),
             h('div', { class: 'row' },
-              h('span', { class: 'muted grow', text: `Total · ${formatCurrency(a.players.length ? Math.floor(a.billsTotalCents / a.players.length) : 0)}+ each` }),
+              h('span', { class: 'muted grow', text: 'Total' }),
               h('strong', { class: 'mono', text: formatCurrency(a.billsTotalCents) }))),
         ...(locked ? [h('p', { class: 'muted small', text: 'The session is settled and locked. Reopen it on the Table tab to change expenses.' })] : [h('button', { class: 'btn tinted block', text: '＋ Add expense', attrs: { disabled: bills.length >= MAX_BILLS }, on: { click: () => openBillForm() } })]),
         h('button', { class: `btn ${onDone ? 'primary' : 'plain'} block`, text: onDone ? 'Continue' : 'Done', on: { click: () => { close(); onDone?.(); } } }));
@@ -53,41 +53,74 @@ function openBillForm(id?: string) {
     const guest = h('input', { attrs: { type: 'text', placeholder: 'Name of the person who paid', maxlength: 40, autocomplete: 'off', 'aria-label': 'Name of the person who paid' } });
     guest.value = existing?.guest ?? '';
     const error = h('p', { class: 'bad small', attrs: { role: 'alert' } });
+    const paidBy = h('p', { class: 'paid-by small', attrs: { 'aria-live': 'polite' } });
+    // who shares it: every player (default) or just the ticked ones; guests who already paid something can be ticked too
+    const guestOpts = [...new Map((s.bills ?? []).filter(b => !b.payerId && b.guest && b.id !== existing?.id).map(b => [b.guest!.trim().toLowerCase(), b.guest!])).entries()]
+      .filter(([k]) => !s.players.some(p => p.name.trim().toLowerCase() === k));
+    const playerIds = s.players.map(p => p.id);
+    let sharing = new Set<string>(existing?.sharedBy?.length ? existing.sharedBy : playerIds);
+    const shareRow = h('div', { class: 'seg-row wrap', attrs: { role: 'group', 'aria-label': 'Who shares this expense' } });
+    const shareNote = h('p', { class: 'muted small', attrs: { 'aria-live': 'polite' } });
+    const keepFocus = (box: HTMLElement, redraw: () => void) => {
+      const i = [...box.children].indexOf(document.activeElement as Element);
+      redraw();
+      if (i >= 0) (box.children[i] as HTMLElement | undefined)?.focus();
+    };
+    const drawShare0 = () => {
+      const all = playerIds.every(id => sharing.has(id)) && guestOpts.every(([k]) => !sharing.has(`guest:${k}`));
+      shareRow.replaceChildren(
+        h('button', { class: `chip ${all ? 'on' : ''}`, text: `${all ? '✓ ' : ''}Everyone`, attrs: { 'aria-pressed': all }, on: { click: () => { sharing = new Set(playerIds); drawShare(); } } }),
+        ...s.players.map(p => { const on = sharing.has(p.id); return h('button', { class: `chip ${on ? 'on' : ''}`, text: `${on ? '✓ ' : ''}${p.name}`, attrs: { 'aria-pressed': on }, on: { click: () => { if (on) sharing.delete(p.id); else sharing.add(p.id); drawShare(); } } }); }),
+        ...guestOpts.map(([k, name]) => { const id = `guest:${k}`; const on = sharing.has(id); return h('button', { class: `chip ${on ? 'on' : ''}`, text: `${on ? '✓ ' : ''}${name} (not playing)`, attrs: { 'aria-pressed': on }, on: { click: () => { if (on) sharing.delete(id); else sharing.add(id); drawShare(); } } }); }));
+      const n = sharing.size;
+      shareNote.textContent = n === 0 ? 'Pick at least one person.' : all ? 'Shared equally by everyone who played.' : `Shared equally by ${n} ${n === 1 ? 'person' : 'people'}.`;
+    };
+    const drawShare = () => keepFocus(shareRow, drawShare0);
+    drawShare0();
+    const labels = h('div', { class: 'seg-row wrap', attrs: { 'aria-label': 'Quick labels' } },
+      ...['Pizza', 'Drinks', 'Snacks', 'Beer', 'Tip'].map(t => h('button', { class: 'chip', text: t, on: { click: () => { label.value = t; amount.focus(); } } })));
     const chips = h('div', { class: 'seg-row wrap', attrs: { role: 'radiogroup', 'aria-label': 'Who paid' } });
     const guestRow = h('label', { class: 'row field' }, h('span', { text: 'Name' }), guest);
-    const drawChips = () => {
+    const drawChips0 = () => {
+      paidBy.textContent = someoneElse ? (guest.value.trim() ? `Paid by ${guest.value.trim()} (not playing)` : 'Type the name of the person who paid') : payerId ? `Paid by ${s.players.find(p => p.id === payerId)?.name ?? ''}` : 'Pick who paid';
       chips.replaceChildren(
         ...s.players.map(p => h('button', {
-          class: `chip ${!someoneElse && payerId === p.id ? 'on' : ''}`, text: p.name,
+          class: `chip ${!someoneElse && payerId === p.id ? 'on' : ''}`, text: `${!someoneElse && payerId === p.id ? '✓ ' : ''}${p.name}`,
           attrs: { role: 'radio', 'aria-checked': !someoneElse && payerId === p.id },
           on: { click: () => { payerId = p.id; someoneElse = false; drawChips(); } }
         })),
         h('button', {
-          class: `chip ${someoneElse ? 'on' : ''}`, text: 'Someone else…',
+          class: `chip ${someoneElse ? 'on' : ''}`, text: `${someoneElse ? '✓ ' : ''}Someone else…`,
           attrs: { role: 'radio', 'aria-checked': someoneElse },
           on: { click: () => { someoneElse = true; payerId = undefined; drawChips(); guest.focus(); } }
         }));
       guestRow.hidden = !someoneElse;
     };
-    drawChips();
+    const drawChips = () => keepFocus(chips, drawChips0);
+    drawChips0();
     const submit = () => {
       const input = {
         label: label.value, cents: toCents(amount.value),
-        ...(someoneElse ? { guest: guest.value } : payerId ? { payerId } : {})
+        ...(someoneElse ? { guest: guest.value } : payerId ? { payerId } : {}),
+        ...(sharing.size && !(playerIds.every(id => sharing.has(id)) && guestOpts.every(([k]) => !sharing.has(`guest:${k}`))) ? { sharedBy: [...sharing] } : {})
       };
+      if (sharing.size === 0) { error.textContent = 'Pick at least one person to share this expense.'; return; }
       const err = saveBill(input, existing?.id);
       if (err) { error.textContent = err; return; }
       haptic();
       close();
     };
+    guest.addEventListener('input', () => drawChips());
     for (const el of [label, amount, guest]) el.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
     return h('div', { class: 'sheet-body' },
+      labels,
       group(
         h('label', { class: 'row field' }, h('span', { text: 'What' }), label),
         h('label', { class: 'row field' }, h('span', { text: 'Amount ($)' }), amount)),
       h('div', { class: 'section-title' }, h('span', { text: 'Who paid?' })),
-      chips, group(guestRow),
-      h('p', { class: 'muted small', text: 'Shared equally by everyone who played.' }),
+      chips, group(guestRow), paidBy,
+      h('div', { class: 'section-title' }, h('span', { text: 'Who shares it?' })),
+      shareRow, shareNote,
       error,
       h('button', { class: 'btn primary block', text: existing ? 'Save changes' : 'Add expense', on: { click: submit } }),
       ...(existing ? [h('button', { class: 'btn danger block', text: 'Delete expense', on: { click: () => { close(); confirmSheet({
@@ -103,7 +136,7 @@ function openBillForm(id?: string) {
  */
 export function askExtraExpenses(proceed: () => void) {
   openSheet('Any extra expenses?', close => h('div', { class: 'sheet-body' },
-    h('p', { class: 'muted', text: 'Was there food, drinks or anything else paid by a player — or by someone who isn’t playing? It will be shared equally and added to the settlement.' }),
+    h('p', { class: 'muted', text: 'Was there food, drinks or anything else paid by a player — or by someone who isn’t playing? It will be split between the people you choose and added to the settlement.' }),
     h('button', { class: 'btn primary block', text: 'No extra expenses', on: { click: () => { close(); proceed(); } } }),
     h('button', { class: 'btn tinted block', text: 'Yes, add expenses', on: { click: () => { close(); openExpenses(proceed); } } }),
     h('button', { class: 'btn plain block', text: 'Not now', on: { click: close } })));
@@ -115,7 +148,7 @@ export function previewLines(): string {
   if (a.billsTotalCents === 0) return '';
   const lines = a.players.map(p => `${p.name}: ${formatCurrency(p.netCents, true)} poker ${p.paidCents - p.shareCents >= 0 ? '+' : '−'} ${formatCurrency(Math.abs(p.paidCents - p.shareCents))} food = ${formatCurrency(p.finalCents, true)}`);
   a.guests.forEach(g => lines.push(`${g.name} (not playing): ${formatCurrency(g.finalCents, true)}`));
-  return `Extra expenses ${formatCurrency(a.billsTotalCents)}, shared equally:\n${lines.join('\n')}\n\n`;
+  return `Extra expenses ${formatCurrency(a.billsTotalCents)}, split as chosen:\n${lines.join('\n')}\n\n`;
 }
 
 export { checkBill };

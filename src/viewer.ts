@@ -34,12 +34,20 @@ export function mountViewer(rawCode: string) {
   // never writes anything to this device.
   let view: 'table' | 'list' = 'table';
   let statusEl: HTMLElement | null = null;
+  let freshEl: HTMLElement | null = null;
+  let validUntil: number | undefined;
+  let lastChangeAt = Date.now(); // when this page last saw the table change (drives the slower polling)
 
   // "That's me": remembered for this browser tab only (sessionStorage), never in the device's saved data.
   const ME_KEY = `viewer-me:${code ?? ''}`;
   const readMe = (): string | null => { try { return sessionStorage.getItem(ME_KEY); } catch { return null; } };
   const writeMe = (id: string | null) => { try { if (id) sessionStorage.setItem(ME_KEY, id); else sessionStorage.removeItem(ME_KEY); } catch { /* ignore */ } };
-  let meId: string | null = readMe();
+  // Optional: the viewer may ask to be remembered on this phone (their choice; stored only in this browser).
+  const REMEMBER_KEY = `viewer-remember:${code ?? ''}`;
+  const readRemember = (): string | null => { try { return localStorage.getItem(REMEMBER_KEY); } catch { return null; } };
+  const writeRemember = (id: string | null) => { try { if (id) localStorage.setItem(REMEMBER_KEY, id); else localStorage.removeItem(REMEMBER_KEY); } catch { /* ignore */ } };
+  let rememberWanted = readRemember() !== null;
+  let meId: string | null = readMe() ?? readRemember();
 
   // Hand-over: the host may offer the table to a player. Accepting only sends a request; the host confirms.
   let offer: PublicOffer | undefined;
@@ -174,9 +182,9 @@ export function mountViewer(rawCode: string) {
 
     if (a.billsTotalCents > 0) {
       const nameOf = (b: { payerId?: string; guest?: string }) => (b.payerId && a.players.find(p => p.id === b.payerId)?.name) || b.guest || 'Someone else';
-      out.push(header('Extra expenses', `${formatCurrency(a.billsTotalCents)} · shared equally`));
+      out.push(header('Extra expenses', formatCurrency(a.billsTotalCents)));
       out.push(group(...(snap.bills ?? []).map(b => h('div', { class: 'row' },
-        h('span', { class: 'grow' }, h('strong', { text: b.label }), h('div', { class: 'muted small', text: `paid by ${nameOf(b)}` })),
+        h('span', { class: 'grow' }, h('strong', { text: b.label }), h('div', { class: 'muted small', text: `paid by ${nameOf(b)} · ${b.sharedBy?.length ? `shared by ${b.sharedBy.length}` : 'shared by everyone'}` })),
         h('span', { class: 'mono', text: formatCurrency(b.cents) })))));
     }
 
@@ -205,7 +213,14 @@ export function mountViewer(rawCode: string) {
           h('span', { class: 'muted mono', text: formatBuyInCount(p.buyInCount) }),
           h('span', { class: `mono ${p.netCents > 0 ? 'good' : p.netCents < 0 ? 'bad' : 'muted'}`, text: formatCurrency(p.netCents, true) }),
           ...(a.billsTotalCents > 0 ? [h('span', { class: `mono ${p.finalCents > 0 ? 'good' : p.finalCents < 0 ? 'bad' : 'muted'}`, text: `→ ${formatCurrency(p.finalCents, true)}` })] : [])))));
-      if (a.guests.length) out.push(group(...a.guests.map(g => h('div', { class: 'row standing' }, h('span', { class: 'rank', text: '🍕' }), h('span', { class: 'grow', text: `${g.name} (not playing)` }), h('span', { class: 'mono good', text: formatCurrency(g.finalCents, true) })))));
+      if (a.guests.length) out.push(group(...a.guests.map(g => h('div', { class: 'row standing' }, h('span', { class: 'rank', text: '🍕' }), h('span', { class: 'grow', text: `${g.name} (not playing)` }), h('span', { class: `mono ${g.finalCents > 0 ? 'good' : g.finalCents < 0 ? 'bad' : 'muted'}`, text: formatCurrency(g.finalCents, true) })))));
+    }
+    const recent = (snap.log ?? []).slice(-8).reverse();
+    if (recent.length) {
+      out.push(header('Recent activity'));
+      out.push(group(...recent.map(e => h('div', { class: 'row' },
+        h('span', { class: 'grow small', text: e.m }),
+        h('span', { class: 'muted small mono', text: ago(Date.now() - e.t) })))));
     }
     if (a.players.length >= 2 && a.isBalanced) {
       out.push(h('button', { class: 'btn tinted block', text: '🖼️ Save as picture', on: { click: () => sharePicture(drawSettlement(snap!.name, a, k => Boolean(snap!.paid[k])), 'settlement.png', snap!.name) } }));
@@ -222,7 +237,8 @@ export function mountViewer(rawCode: string) {
     if (a.players.length >= 2 && a.isBalanced) {
       for (const t of a.transfers) {
         const paid = Boolean(snap!.paid[paidKey(t.id, t.amountCents)]);
-        if (t.fromId === me.id) lines.push(h('div', { class: 'me-line' }, h('span', { class: 'bad', text: `You pay ${t.toName}` }), h('strong', { class: 'mono', text: `${formatCurrency(t.amountCents)}${paid ? ' ✓' : ''}` })));
+        if (t.fromId === me.id) lines.push(h('div', { class: 'me-line' }, h('span', { class: 'bad', text: `You pay ${t.toName}` }), h('strong', { class: 'mono', text: `${formatCurrency(t.amountCents)}${paid ? ' ✓' : ''}` }),
+          h('button', { class: 'link', text: 'Copy', attrs: { 'aria-label': `Copy ${(t.amountCents / 100).toFixed(2)}` }, on: { click: async () => { try { await navigator.clipboard.writeText((t.amountCents / 100).toFixed(2)); toast('Amount copied'); } catch { toast('Could not copy', 'error'); } } } })));
         else if (t.toId === me.id) lines.push(h('div', { class: 'me-line' }, h('span', { class: 'good', text: `${t.fromName} pays you` }), h('strong', { class: 'mono', text: `${formatCurrency(t.amountCents)}${paid ? ' ✓' : ''}` })));
       }
       if (lines.length === 0) lines.push(h('div', { class: 'me-line muted', text: 'You don’t owe or receive anything.' }));
@@ -243,9 +259,11 @@ export function mountViewer(rawCode: string) {
     const players = snap.players;
     openSheet('Which player are you?', close => h('div', { class: 'sheet-body' },
       h('p', { class: 'muted small', text: 'We’ll highlight your seat and show what you pay or receive. Only saved in this browser tab.' }),
-      group(...players.map(p => h('button', { class: 'row action', on: { click: () => { writeMe(p.id); meId = p.id; close(); render(); } } },
+      group(...players.map(p => h('button', { class: 'row action', on: { click: () => { writeMe(p.id); if (rememberWanted) writeRemember(p.id); meId = p.id; close(); render(); } } },
         h('span', { class: 'grow', text: p.name })))),
-      ...(meId ? [h('button', { class: 'btn plain block', text: 'Clear', on: { click: () => { writeMe(null); meId = null; close(); render(); } } })] : []),
+      h('label', { class: 'row field' }, h('span', { text: 'Remember me on this phone' }),
+        h('input', { attrs: { type: 'checkbox', 'aria-label': 'Remember me on this phone', checked: rememberWanted }, on: { change: e => { rememberWanted = (e.target as HTMLInputElement).checked; if (!rememberWanted) writeRemember(null); else if (meId) writeRemember(meId); } } })),
+      ...(meId ? [h('button', { class: 'btn plain block', text: 'Clear', on: { click: () => { writeMe(null); writeRemember(null); meId = null; close(); render(); } } })] : []),
       h('button', { class: 'btn plain block', text: 'Cancel', on: { click: close } })));
   }
 
@@ -261,6 +279,18 @@ export function mountViewer(rawCode: string) {
       h('button', { class: 'btn primary block', text: 'Close', on: { click: close } })));
   }
 
+  const ago = (ms: number) => {
+    const m = Math.floor(ms / 60000);
+    return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : `${Math.floor(m / 60)} h ${m % 60} min ago`;
+  };
+  /** "Host updated 3 min ago" — and a nudge when nothing has changed for a while; plus how long the link lasts. */
+  const freshText = () => {
+    if (!snap) return '';
+    const quiet = Date.now() - snap.updatedAt;
+    const until = validUntil ? ` · link valid until ${new Date(validUntil).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}` : '';
+    return `Host updated ${ago(quiet)}${quiet > 10 * 60000 && !snap.isEnded ? ' — the host may be away' : ''}${until}`;
+  };
+
   const statusText = () =>
     phase === 'invalid' ? 'Invalid code' :
     phase === 'ok' ? `● Live · updated ${updated}` :
@@ -274,10 +304,23 @@ export function mountViewer(rawCode: string) {
       h('main', { class: 'scroll' },
         h('div', { class: 'large-title' }, h('h1', { text: 'Live table' }), pill),
         h('div', { class: 'subtitle wrap', text: snap?.name ?? (code ? `Code ${formatCode(code)}` : '') }),
+        snap ? (freshEl = h('div', { class: 'subtitle fresh', text: freshText(), attrs: { role: 'status' } })) : null,
         h('div', { class: 'view' }, ...body())),
       h('nav', { class: 'tabbar viewer-bar', attrs: { 'aria-label': 'Live view' } },
         (statusEl = h('span', { class: `viewer-status ${phase}`, text: statusText(), attrs: { role: 'status', 'aria-live': 'polite' } })),
+        h('button', { class: 'link', text: 'Refresh', attrs: { 'aria-label': 'Refresh now' }, on: { click: () => { failures = 0; void poll(); toast('Refreshing…'); } } }),
         h('button', { class: 'link', text: 'Leave', attrs: { 'aria-label': 'Leave live view' }, on: { click: leave } })));
+  }
+
+  /** Small in-page notices when something important happens while the page is open. */
+  function alertChanges(a: SharedSnapshot, b: SharedSnapshot) {
+    if (!a.isEnded && b.isEnded) toast('The host settled the game');
+    else if (a.isEnded && !b.isEnded) toast('The host reopened the game');
+    else if (b.isEnded) {
+      const was = Object.keys(a.paid).length;
+      const now = Object.keys(b.paid).length;
+      if (now > was) toast('A payment was marked paid ✓');
+    }
   }
 
   async function poll() {
@@ -297,11 +340,17 @@ export function mountViewer(rawCode: string) {
       if (res.status === 503) { phase = 'unavailable'; render(); timer = window.setTimeout(poll, 30000); return; }
       if (res.status === 429) { throw new Error('rate'); }
       if (!res.ok) throw new Error(String(res.status));
-      const data = (await res.json()) as { unchanged?: boolean; rev: number; snapshot?: SharedSnapshot; offer?: PublicOffer };
+      const data = (await res.json()) as { unchanged?: boolean; rev: number; snapshot?: SharedSnapshot; offer?: PublicOffer; expiresAt?: number };
       failures = 0;
       miss404 = 0;
       const changed = (!data.unchanged && !!data.snapshot) || phase !== 'ok';
-      if (!data.unchanged && data.snapshot) { snap = data.snapshot; rev = data.rev; offer = data.offer; }
+      if (data.expiresAt) validUntil = data.expiresAt;
+      if (!data.unchanged && data.snapshot) {
+        const before = snap;
+        snap = data.snapshot; rev = data.rev; offer = data.offer;
+        lastChangeAt = Date.now();
+        if (before) alertChanges(before, snap);
+      }
       phase = 'ok';
       updated = new Date().toTimeString().slice(0, 8);
       // An offer that has run out must disappear even though nothing else changed.
@@ -311,6 +360,9 @@ export function mountViewer(rawCode: string) {
       if (changed || lapsed) render();
       void checkClaim();
       if (!changed && !lapsed && statusEl) { statusEl.textContent = statusText(); statusEl.className = `viewer-status ${phase}`; }
+      if (freshEl) freshEl.textContent = freshText();
+      // a table nobody has touched for 5 minutes does not need a check every 3 seconds
+      if (Date.now() - lastChangeAt > 5 * 60000) next = 10000;
     } catch (e) {
       failures += 1;
       phase = 'offline';

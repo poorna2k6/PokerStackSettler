@@ -34,6 +34,8 @@ export interface AuditGuest {
   id: string;
   name: string;
   paidCents: number;
+  /** their share of expenses they were ticked on (a guest who ate too) */
+  shareCents: number;
   finalCents: number;
 }
 
@@ -46,6 +48,8 @@ export interface Bill {
   payerId?: string;
   /** …the name of someone not in the player list who paid */
   guest?: string;
+  /** who shares this expense: player ids and guest ids (`guest:name`). Missing = every player. */
+  sharedBy?: string[];
 }
 
 export interface Audit {
@@ -255,8 +259,6 @@ export function solve(
   // Extra expenses: split equally between the players; whoever paid gets it back. Nobody's poker result changes.
   const validBills = bills.filter(b => b && Number.isFinite(b.cents) && b.cents > 0);
   const billsTotalCents = validBills.reduce((a, b) => a + Math.round(b.cents), 0);
-  const shares = splitEvenly(billsTotalCents, clean.length);
-  clean.forEach((p, i) => { p.shareCents = shares[i]; });
   const guestMap = new Map<string, AuditGuest>();
   const byName = new Map(clean.map(p => [p.name.trim().toLowerCase(), p]));
   for (const b of validBills) {
@@ -266,13 +268,26 @@ export function solve(
     if (player) { player.paidCents += cents; continue; }
     const name = cleanName(b.guest || 'Someone else');
     const key = name.toLowerCase();
-    const g = guestMap.get(key) ?? { id: `${GUEST_PREFIX}${key}`, name, paidCents: 0, finalCents: 0 };
+    const g = guestMap.get(key) ?? { id: `${GUEST_PREFIX}${key}`, name, paidCents: 0, shareCents: 0, finalCents: 0 };
     g.paidCents += cents;
-    g.finalCents = g.paidCents;
     guestMap.set(key, g);
   }
-  clean.forEach(p => { p.finalCents = p.netCents + p.paidCents - p.shareCents; });
   const guests = [...guestMap.values()];
+  // Bills shared by everyone are pooled and split together; a bill with a chosen list is split between just those people.
+  const people: { id: string; add: (c: number) => void }[] = [
+    ...clean.map(p => ({ id: p.id, add: (c: number) => { p.shareCents += c; } })),
+    ...guests.map(g => ({ id: g.id, add: (c: number) => { g.shareCents += c; } }))
+  ];
+  let pooled = 0;
+  for (const b of validBills) {
+    const cents = Math.round(b.cents);
+    const chosen = b.sharedBy?.length ? people.filter(x => b.sharedBy!.includes(x.id)) : [];
+    if (chosen.length === 0) { pooled += cents; continue; }
+    splitEvenly(cents, chosen.length).forEach((c, i) => chosen[i].add(c));
+  }
+  splitEvenly(pooled, clean.length).forEach((c, i) => { clean[i].shareCents += c; });
+  clean.forEach(p => { p.finalCents = p.netCents + p.paidCents - p.shareCents; });
+  guests.forEach(g => { g.finalCents = g.paidCents - g.shareCents; });
 
   const totalBuyInCents = clean.reduce((a, p) => a + p.buyInCents, 0);
   const totalPlayerCashOutCents = clean.reduce((a, p) => a + p.cashOutCents, 0);
@@ -416,6 +431,10 @@ export function sanitizeBills(raw: unknown): Bill[] {
     const bill: Bill = { id, label: String(typeof o.label === 'string' ? o.label : 'Expense').trim().slice(0, MAX_NAME) || 'Expense', cents };
     const payerId = typeof o.payerId === 'string' && o.payerId ? o.payerId.slice(0, 64) : '';
     const guest = typeof o.guest === 'string' ? o.guest.trim().slice(0, MAX_NAME) : '';
+    if (Array.isArray(o.sharedBy)) {
+      const ids = [...new Set(o.sharedBy.filter((x): x is string => typeof x === 'string' && x.length > 0 && x.length <= 80))].slice(0, 70);
+      if (ids.length) bill.sharedBy = ids;
+    }
     if (payerId) bill.payerId = payerId;
     else {
       const key = (guest || 'Someone else').toLowerCase();
@@ -443,6 +462,23 @@ export interface SessionData {
   paid: Record<string, boolean>;
   /** extra expenses (food, drinks…) shared equally between the players */
   bills?: Bill[];
+  /** the last few things that happened at the table, newest last (shown to viewers) */
+  log?: LogEntry[];
+}
+
+export interface LogEntry { t: number; m: string }
+export const MAX_LOG = 30;
+export function sanitizeLog(raw: unknown): LogEntry[] {
+  if (!Array.isArray(raw)) return [];
+  const out: LogEntry[] = [];
+  for (const r of raw.slice(-MAX_LOG)) {
+    if (!r || typeof r !== 'object') continue;
+    const o = r as Record<string, unknown>;
+    const t = Number(o.t);
+    if (!Number.isFinite(t) || typeof o.m !== 'string') continue;
+    out.push({ t: Math.round(t), m: o.m.slice(0, 80) });
+  }
+  return out;
 }
 
 export interface SavedSession {
@@ -573,14 +609,14 @@ export function buildNotepad(s: SavedSession | (SessionData & { timestamp?: stri
     );
   });
   if (audit.billsTotalCents > 0) {
-    lines.push(dash, 'EXTRA EXPENSES (shared equally by the players)', dash);
+    lines.push(dash, 'EXTRA EXPENSES (each split equally between the people it was shared by)', dash);
     for (const b of s.bills ?? []) {
       const payer = (b.payerId && audit.players.find(p => p.id === b.payerId)?.name) || b.guest || 'Someone else';
-      lines.push(`- ${b.label}: ${formatCurrency(b.cents)} paid by ${payer}`);
+      lines.push(`- ${b.label}: ${formatCurrency(b.cents)} paid by ${payer}${b.sharedBy?.length ? ` (shared by ${b.sharedBy.length})` : ''}`);
     }
     lines.push(`Total: ${formatCurrency(audit.billsTotalCents)}`, '', 'Player                Poker      Paid     Share     Final');
     audit.players.forEach(p => lines.push([p.name.slice(0, 19).padEnd(20), formatCurrency(p.netCents, true).padStart(9), formatCurrency(p.paidCents).padStart(9), formatCurrency(-p.shareCents).padStart(9), formatCurrency(p.finalCents, true).padStart(9)].join(' ')));
-    audit.guests.forEach(g => lines.push([`${g.name.slice(0, 15)} (guest)`.padEnd(20), ''.padStart(9), formatCurrency(g.paidCents).padStart(9), ''.padStart(9), formatCurrency(g.finalCents, true).padStart(9)].join(' ')));
+    audit.guests.forEach(g => lines.push([`${g.name.slice(0, 15)} (guest)`.padEnd(20), ''.padStart(9), formatCurrency(g.paidCents).padStart(9), formatCurrency(-g.shareCents).padStart(9), formatCurrency(g.finalCents, true).padStart(9)].join(' ')));
   }
   lines.push(dash, `2. WHO PAYS WHOM (${audit.transfers.length} transfers)`, dash);
   if (audit.transfers.length === 0) lines.push('* No payments needed.');
@@ -615,7 +651,7 @@ export function buildReceipt(
     .forEach(p =>
       lines.push(`• ${p.name} [${formatBuyInCount(p.buyInCount)}]: ${formatCurrency(p.netCents, true)}${audit.billsTotalCents > 0 ? ` → ${formatCurrency(p.finalCents, true)} after food & drinks` : ''}`)
     );
-  audit.guests.forEach(g => lines.push(`• ${g.name} (paid for food/drinks): ${formatCurrency(g.finalCents, true)}`));
+  audit.guests.forEach(g => lines.push(`• ${g.name} (not playing, food & drinks): ${formatCurrency(g.finalCents, true)}`));
   return lines.join('\n');
 }
 
