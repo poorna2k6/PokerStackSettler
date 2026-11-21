@@ -1,15 +1,20 @@
 // Host side of live sharing. The host's device stays the single source of truth and the only writer:
 // it pushes snapshots to /api/share using a secret host key that never leaves this device.
-import { confirmSheet, toast } from './dom';
+import { closeAllSheets, confirmSheet, toast } from './dom';
 import { normalizeCode, type SharedSnapshot } from './shared';
-import { notify, onCommit, onShareOrphaned, setShare, shareSnapshot, state } from './state';
+import { lockPersistence, notify, onCommit, onShareOrphaned, setShare, shareSnapshot, state } from './state';
+import { loadLive } from './storage';
 
 const API = '/api/share';
 const PUSH_DELAY_MS = 600;
 const RETRY_MS = 15000;
 
-export type SyncPhase = 'off' | 'syncing' | 'ok' | 'offline' | 'expired';
-export const sync: { phase: SyncPhase; at: string } = { phase: 'off', at: '' };
+export type SyncPhase = 'off' | 'syncing' | 'ok' | 'offline' | 'unavailable' | 'expired';
+/** expiresAt: when the server will drop the link if the host makes no further change (ms since epoch). */
+export const sync: { phase: SyncPhase; at: string; expiresAt?: number; ttl?: number } = { phase: 'off', at: '' };
+let wantTtl: number | undefined; // a new lifetime the host picked, sent with the next save
+let lastOkAt = 0;
+let missCount = 0;
 
 function setPhase(phase: SyncPhase, at = sync.at) {
   if (sync.phase === phase && sync.at === at) return;
@@ -42,29 +47,50 @@ export async function call<T>(method: string, query: string, body?: unknown, hos
 
 /** This phone is no longer the host. The local copy stays; the person can watch live instead. */
 export function handedOver(code: string, who?: string) {
+  // Did ANOTHER TAB on this phone become the host? Then the saved copy now holds that tab's key, and this tab must
+  // leave it alone (it shares the same storage).
+  const mine = state.session.share;
+  const stored = loadLive()?.share;
+  const otherTab = !!mine && !!stored && stored.code === mine.code && stored.hostKey !== mine.hostKey;
+  if (otherTab) lockPersistence();
   if (state.session.share?.code === code) setShare(undefined);
   setPhase('off', '');
-  confirmSheet({
+  closeAllSheets(); // e.g. a 'Hand over the table' sheet that no longer applies
+  setTimeout(() => confirmSheet({
     title: 'Table handed over',
-    message: `${who ? `${who} is` : 'Someone else is'} now the host of “${state.session.name}”. Your own copy stays on this phone.`,
+    message: `${who ? `${who} is` : 'Someone else is'} now the host of “${state.session.name}”. ${otherTab ? 'Another tab on this phone took over, so changes in this tab are no longer saved — reload it.' : 'Your own copy stays on this phone.'}`,
     confirmLabel: 'Watch live', cancelLabel: 'Keep my copy',
     onConfirm: () => { location.hash = `#/v/${code}`; }
-  });
+  }), 240);
 }
 
 export const shareUrl = (code: string) => `${location.origin}${location.pathname}#/v/${code}`;
 
-export async function startSharing(): Promise<string | null> {
+export async function startSharing(ttlSeconds?: number): Promise<string | null> {
   if (state.session.isDemo) return 'Demo data can’t be shared — start a fresh session first.';
   try {
-    const r = await call<{ code: string; hostKey: string; error?: string }>('POST', '', { snapshot: shareSnapshot() });
+    const r = await call<{ code: string; hostKey: string; error?: string; reason?: string; expiresAt?: number; ttl?: number }>('POST', '', { snapshot: shareSnapshot(), ttlSeconds });
+    if (r.status === 503 && r.data?.reason === 'storage_not_configured') return 'Live sharing isn’t set up on this server yet (its storage is not connected). See the README, section “Deploying on Vercel”.';
     if (r.status !== 201 || !normalizeCode(r.data?.code)) return r.data?.error ?? 'Could not start sharing. Check your connection and try again.';
     setShare({ code: r.data.code, hostKey: r.data.hostKey });
+    sync.expiresAt = r.data.expiresAt;
+    sync.ttl = r.data.ttl;
+    lastOkAt = Date.now();
+    missCount = 0;
     setPhase('ok', clock());
     return null;
   } catch {
     return 'Could not reach the server. Check your connection and try again.';
   }
+}
+
+/** Changes how long the link stays valid after the host's last change; applied with the next save (sent now). */
+export function setShareTtl(seconds: number) {
+  if (!state.session.share) return;
+  wantTtl = seconds;
+  sync.ttl = seconds;
+  dirty = true;
+  void flush();
 }
 
 /** Stops the link for everyone. Returns false if the server could not be told (the link then expires on its own). */
@@ -135,17 +161,39 @@ async function flush() {
   dirty = false;
   inFlight = true;
   try {
-    const r = await call('PUT', `?code=${share.code}`, { snapshot: shareSnapshot() }, share.hostKey);
+    const sending = wantTtl;
+    const r = await call<{ expiresAt?: number; ttl?: number; reason?: string }>('PUT', `?code=${share.code}`, { snapshot: shareSnapshot(), ttlSeconds: sending }, share.hostKey);
     if (r.status === 200) {
+      missCount = 0;
+      lastOkAt = Date.now();
+      if (r.data?.expiresAt) sync.expiresAt = r.data.expiresAt;
+      if (r.data?.ttl) sync.ttl = r.data.ttl;
+      if (sending !== undefined && wantTtl === sending) wantTtl = undefined;
       setPhase('ok', clock());
+    } else if (r.status === 503) {
+      // the server has no storage: keep the key, say so, and try again slowly
+      dirty = true;
+      setPhase('unavailable');
+      clearTimeout(retryTimer);
+      retryTimer = window.setTimeout(flush, 60000);
     } else if (r.status === 403) {
       // the host key no longer matches: the table was handed to someone else
       handedOver(share.code);
     } else if (r.status === 404) {
-      // expired (7 days without a host edit) or stopped elsewhere
-      setShare(undefined);
-      setPhase('expired', '');
-      toast('Your live link expired — share again to get a new one', 'error');
+      // One 404 is not proof: a flaky backend can answer it for a link that is fine. Only give up (and discard the
+      // key) after three misses in a row, spaced out.
+      missCount += 1;
+      if (missCount < 3) {
+        dirty = true;
+        setPhase('offline');
+        clearTimeout(retryTimer);
+        retryTimer = window.setTimeout(flush, 5000);
+      } else {
+        missCount = 0;
+        setShare(undefined);
+        setPhase('expired', '');
+        toast(r.data?.reason === 'stopped' ? 'This live link was stopped — share again to get a new one' : 'Your live link expired — share again to get a new one', 'error');
+      }
     } else {
       throw new Error(String(r.status));
     }
@@ -173,8 +221,10 @@ function schedule() {
 
 onCommit(schedule);
 window.addEventListener('online', () => { void drainPendingStops(); if (state.session.share) { clearTimeout(retryTimer); void flush(); } });
+// Coming back to the app (a PWA is resumed, not reloaded): catch up, and refresh the link's lifetime if it has been a while.
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && state.session.share && sync.phase === 'offline') void flush();
+  if (document.visibilityState !== 'visible' || !state.session.share || state.session.isDemo) return;
+  if (sync.phase === 'offline' || sync.phase === 'unavailable' || Date.now() - lastOkAt > 5 * 60 * 1000) { clearTimeout(retryTimer); void flush(); }
 });
 void drainPendingStops();
 // A session restored from storage that was being shared: push the current state (and refresh its 7 days).

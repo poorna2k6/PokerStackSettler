@@ -5,6 +5,9 @@ import { createHash, randomBytes, randomInt, timingSafeEqual } from "node:crypto
 
 // src/engine.ts
 var MAX_NAME = 40;
+var MAX_BILLS = 30;
+var MAX_GUESTS = 8;
+var MAX_BILL_CENTS = 1e7;
 function toCents(val) {
   const str = typeof val === "number" ? Number.isFinite(val) ? String(val) : "" : String(val ?? "");
   const m = /^(-?)(\d*)(?:\.(\d*))?$/.exec(str.replace(/[$,\s]/g, ""));
@@ -45,6 +48,36 @@ function sanitizePlayers(raw) {
   });
   return out;
 }
+function sanitizeBills(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  const guests = /* @__PURE__ */ new Set();
+  const seen = /* @__PURE__ */ new Set();
+  for (const r of raw) {
+    if (out.length >= MAX_BILLS) break;
+    if (!r || typeof r !== "object") continue;
+    const o = r;
+    const n = typeof o.cents === "number" ? o.cents : Number(o.cents);
+    if (!Number.isFinite(n)) continue;
+    const cents = Math.min(MAX_BILL_CENTS, Math.round(n));
+    if (cents <= 0) continue;
+    let id = typeof o.id === "string" && o.id ? o.id.slice(0, 64) : `b_${out.length}`;
+    while (seen.has(id)) id += "_";
+    const bill = { id, label: String(typeof o.label === "string" ? o.label : "Expense").trim().slice(0, MAX_NAME) || "Expense", cents };
+    const payerId = typeof o.payerId === "string" && o.payerId ? o.payerId.slice(0, 64) : "";
+    const guest = typeof o.guest === "string" ? o.guest.trim().slice(0, MAX_NAME) : "";
+    if (payerId) bill.payerId = payerId;
+    else {
+      const key = (guest || "Someone else").toLowerCase();
+      if (!guests.has(key) && guests.size >= MAX_GUESTS) continue;
+      guests.add(key);
+      bill.guest = guest || "Someone else";
+    }
+    seen.add(id);
+    out.push(bill);
+  }
+  return out;
+}
 var MIN_UNIT = 0.01;
 var MAX_UNIT = 1e5;
 function parseBuyInUnit(v) {
@@ -71,6 +104,13 @@ var CODE_LENGTH = 8;
 var OFFER_TTL_MS = 10 * 60 * 1e3;
 var KEY_HASH_RE = /^[a-f0-9]{64}$/;
 var SHARE_TTL_SECONDS = 7 * 24 * 60 * 60;
+var SHARE_TTL_CHOICES = [
+  { seconds: 24 * 3600, label: "24 hours" },
+  { seconds: 7 * 24 * 3600, label: "7 days" },
+  { seconds: 30 * 24 * 3600, label: "30 days" },
+  { seconds: 90 * 24 * 3600, label: "Until I stop it (90-day safety limit)" }
+];
+var pickTtl = (raw, fallback = SHARE_TTL_SECONDS) => SHARE_TTL_CHOICES.some((c) => c.seconds === raw) ? raw : fallback;
 function normalizeCode(raw) {
   const code = String(raw ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
   if (code.length !== CODE_LENGTH) return null;
@@ -88,11 +128,19 @@ function sanitizeSnapshot(raw, now = Date.now()) {
     isEnded: o.isEnded === true,
     players: sanitizePlayers(o.players),
     paid: sanitizePaid(o.paid),
+    bills: sanitizeBills(o.bills),
     updatedAt: now
   };
 }
 
 // server/handler.ts
+var StorageNotConfigured = class extends Error {
+  constructor() {
+    super("Sharing storage is not configured");
+    this.name = "StorageNotConfigured";
+  }
+};
+var ttlOf = (rec) => pickTtl(rec?.ttl);
 var MAX_BODY_BYTES = 32 * 1024;
 var LIMITS = {
   create: { max: 10, window: 3600 },
@@ -103,10 +151,8 @@ var LIMITS = {
   // polls per IP per hour (a household shares one IP)
   miss: { max: 40, window: 3600 },
   // unknown-code lookups per IP per hour: stops code guessing
-  claim: { max: 40, window: 3600 },
-  // handover claims per IP per hour
-  claimCode: { max: 60, window: 3600 }
-  // handover claims per code per hour (stops token guessing)
+  claim: { max: 40, window: 3600 }
+  // per IP per hour: seat requests and FAILED token attempts (a valid token is never throttled)
 };
 var sha256 = (s) => createHash("sha256").update(s).digest("hex");
 var json = (status, body, extra = {}) => ({ status, body, headers: { "Cache-Control": "no-store", ...extra } });
@@ -140,6 +186,40 @@ function publicOffer(rec, now) {
   if (!o) return void 0;
   return { kind: o.kind, playerId: o.playerId, expiresAt: o.expiresAt, status: o.claim ? "claimed" : "open" };
 }
+async function mutate(store, code, now, fn) {
+  const key = `share:${code}`;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const raw = await store.get(key);
+    let rec = null;
+    if (raw) {
+      try {
+        rec = JSON.parse(raw);
+      } catch {
+        rec = null;
+      }
+    }
+    const step = await fn(rec);
+    if (step.remove && raw) {
+      if (await store.delIf(key, raw)) {
+        await store.set(`tomb:${code}`, "1", SHARE_TTL_SECONDS);
+        return step.res;
+      }
+      continue;
+    }
+    if (!step.next) return step.res;
+    const ttl = ttlOf(step.next);
+    step.next.expiresAt = now + ttl * 1e3;
+    if (await store.setIf(key, JSON.stringify(step.next), ttl, raw)) return step.res;
+  }
+  return err(409, "The table is busy \u2014 try again");
+}
+async function gone(store, code) {
+  const stopped = await store.get(`tomb:${code}`) !== null;
+  return json(404, {
+    error: stopped ? "The host stopped sharing this table" : "Not found or expired",
+    reason: stopped ? "stopped" : "expired_or_unknown"
+  });
+}
 async function limited(store, key, rule) {
   return await store.incr(key, rule.window) > rule.max;
 }
@@ -151,12 +231,20 @@ async function handleShare(req, store, now = Date.now(), limits = LIMITS) {
       if (await limited(store, `rl:create:${ip}`, limits.create)) return err(429, "Too many new shares, try again later");
       const snapshot = sanitizeSnapshot(req.body?.snapshot, now);
       if (!snapshot) return err(400, "Invalid session");
-      let code2 = newCode();
-      for (let i = 0; i < 5 && await store.get(`share:${code2}`); i++) code2 = newCode();
       const hostKey = randomBytes(24).toString("base64url");
-      const rec = { keyHash: sha256(hostKey), snapshot, rev: 1, createdAt: now, epoch: 1 };
-      await store.set(`share:${code2}`, JSON.stringify(rec), SHARE_TTL_SECONDS);
-      return json(201, { code: code2, hostKey, rev: 1, epoch: 1, expiresAt: now + SHARE_TTL_SECONDS * 1e3 });
+      const ttl = pickTtl(req.body?.ttlSeconds);
+      const rec = { keyHash: sha256(hostKey), snapshot, rev: 1, createdAt: now, epoch: 1, ttl, expiresAt: now + ttl * 1e3 };
+      for (let i = 0; i < 5; i++) {
+        const code2 = newCode();
+        if (await store.setIf(`share:${code2}`, JSON.stringify(rec), ttl, null)) {
+          return json(201, { code: code2, hostKey, rev: 1, epoch: 1, ttl, expiresAt: rec.expiresAt });
+        }
+      }
+      return err(500, "Could not allocate a code");
+    }
+    if (method === "GET" && req.query.action === "health" && !req.query.code) {
+      await store.get("health:ping");
+      return json(200, { ok: true, store: store.kind ?? "unknown" });
     }
     const code = normalizeCode(req.query.code);
     if (!code) return err(400, "Invalid code");
@@ -165,8 +253,9 @@ async function handleShare(req, store, now = Date.now(), limits = LIMITS) {
       if (await limited(store, `rl:read:${ip}`, limits.read)) return err(429, "Too many requests");
       const rec = await load(store, code);
       if (!rec) {
-        if (await limited(store, `rl:miss:${ip}`, limits.miss)) return err(429, "Too many requests");
-        return err(404, "Not found or expired");
+        const g = await gone(store, code);
+        if (g.body.reason !== "stopped" && await limited(store, `rl:miss:${ip}`, limits.miss)) return err(429, "Too many requests");
+        return g;
       }
       const since = Number(req.query.since);
       if (Number.isFinite(since) && since === rec.rev) return json(200, { unchanged: true, rev: rec.rev });
@@ -175,26 +264,35 @@ async function handleShare(req, store, now = Date.now(), limits = LIMITS) {
         rev: rec.rev,
         epoch: rec.epoch ?? 1,
         offer: publicOffer(rec, now),
-        expiresAt: rec.snapshot.updatedAt + SHARE_TTL_SECONDS * 1e3
+        ttl: ttlOf(rec),
+        expiresAt: rec.expiresAt ?? rec.snapshot.updatedAt + ttlOf(rec) * 1e3
       });
     }
     if (method === "PUT" || method === "DELETE") {
-      const rec = await load(store, code);
-      if (!rec) return err(404, "Not found or expired");
-      if (!keyMatches(req.headers["x-host-key"], rec.keyHash)) return err(403, "Only the host can change this table");
-      if (method === "DELETE") {
-        await store.del(`share:${code}`);
-        return json(200, { ok: true });
+      const hostKey = req.headers["x-host-key"];
+      if (method === "PUT") {
+        if (await limited(store, `rl:write:${code}`, limits.write)) return err(429, "Too many updates");
+        const snapshot = sanitizeSnapshot(req.body?.snapshot, now);
+        if (!snapshot) return err(400, "Invalid session");
+        return mutate(store, code, now, async (rec) => {
+          if (!rec) return { res: await gone(store, code) };
+          if (!keyMatches(hostKey, rec.keyHash)) return { res: err(403, "Only the host can change this table") };
+          const next = { ...rec, snapshot, rev: rec.rev + 1 };
+          next.ttl = pickTtl(req.body?.ttlSeconds, ttlOf(rec));
+          return { next, res: json(200, { rev: next.rev, epoch: next.epoch ?? 1, ttl: next.ttl, expiresAt: now + next.ttl * 1e3 }) };
+        });
       }
-      if (await limited(store, `rl:write:${code}`, limits.write)) return err(429, "Too many updates");
-      const snapshot = sanitizeSnapshot(req.body?.snapshot, now);
-      if (!snapshot) return err(400, "Invalid session");
-      const next = { ...rec, snapshot, rev: rec.rev + 1 };
-      await store.set(`share:${code}`, JSON.stringify(next), SHARE_TTL_SECONDS);
-      return json(200, { rev: next.rev, epoch: next.epoch ?? 1, expiresAt: now + SHARE_TTL_SECONDS * 1e3 });
+      return mutate(store, code, now, async (rec) => {
+        if (!rec) return { res: await gone(store, code) };
+        if (!keyMatches(hostKey, rec.keyHash)) return { res: err(403, "Only the host can change this table") };
+        return { remove: true, res: json(200, { ok: true }) };
+      });
     }
     return { ...err(405, "Method not allowed"), headers: { Allow: "GET, POST, PUT, DELETE", "Cache-Control": "no-store" } };
-  } catch {
+  } catch (e) {
+    if (e instanceof StorageNotConfigured) {
+      return json(503, { error: "Sharing storage is not configured on this server", reason: "storage_not_configured" });
+    }
     return err(500, "Server error");
   }
 }
@@ -204,74 +302,92 @@ async function handleAction(req, store, code, now, limits, ip) {
   const body = req.body && typeof req.body === "object" ? req.body : {};
   if (action === "claim") {
     if (method !== "POST") return err(405, "Method not allowed");
-    if (await limited(store, `rl:claim:${ip}`, limits.claim) || await limited(store, `rl:claimcode:${code}`, limits.claimCode)) {
-      return err(429, "Too many attempts, try again later");
-    }
-    const rec2 = await load(store, code);
-    if (!rec2) return err(404, "Not found or expired");
-    const offer = liveOffer(rec2, now);
-    if (!offer) return err(404, "No hand-over is open");
     const keyHash = typeof body.keyHash === "string" ? body.keyHash : "";
     if (!KEY_HASH_RE.test(keyHash)) return err(400, "Invalid key");
-    if (offer.kind === "link") {
-      const token = typeof body.token === "string" ? body.token : "";
-      if (!token || token.length > 200 || !offer.tokenHash || !keyMatches(token, offer.tokenHash)) {
-        return err(403, "This hand-over code is not valid");
+    const token = typeof body.token === "string" ? body.token : "";
+    const throttled = () => limited(store, `rl:claim:${ip}`, limits.claim);
+    let counted = false;
+    const countOnce = async () => {
+      if (counted) return false;
+      counted = true;
+      return throttled();
+    };
+    return mutate(store, code, now, async (rec2) => {
+      if (!rec2) return { res: await gone(store, code) };
+      const offer = liveOffer(rec2, now);
+      if (!offer) return { res: err(404, "No hand-over is open") };
+      if (offer.kind === "link") {
+        if (!token || token.length > 200 || !offer.tokenHash || !keyMatches(token, offer.tokenHash)) {
+          return { res: await countOnce() ? err(429, "Too many attempts, try again later") : err(403, "This hand-over code is not valid") };
+        }
+        const next2 = { ...rec2, keyHash, epoch: (rec2.epoch ?? 1) + 1, rev: rec2.rev + 1, offer: void 0 };
+        return { next: next2, res: json(200, { ok: true, snapshot: next2.snapshot, rev: next2.rev, epoch: next2.epoch }) };
       }
-      const next2 = { ...rec2, keyHash, epoch: (rec2.epoch ?? 1) + 1, rev: rec2.rev + 1, offer: void 0 };
-      await store.set(`share:${code}`, JSON.stringify(next2), SHARE_TTL_SECONDS);
-      return json(200, { ok: true, snapshot: next2.snapshot, rev: next2.rev, epoch: next2.epoch });
-    }
-    if (offer.claim && now - offer.claim.at < 2 * 60 * 1e3) return err(409, "Someone else already accepted \u2014 wait for the host");
-    const next = { ...rec2, rev: rec2.rev + 1, offer: { ...offer, claim: { keyHash, at: now } } };
-    await store.set(`share:${code}`, JSON.stringify(next), SHARE_TTL_SECONDS);
-    return json(200, { ok: true, rev: next.rev });
+      if (offer.claim && now - offer.claim.at < 2 * 60 * 1e3) return { res: err(409, "Someone else already accepted \u2014 wait for the host") };
+      if (await countOnce()) return { res: err(429, "Too many attempts, try again later") };
+      const next = { ...rec2, rev: rec2.rev + 1, offer: { ...offer, claim: { keyHash, at: now } } };
+      return { next, res: json(200, { ok: true, rev: next.rev }) };
+    });
   }
-  const rec = await load(store, code);
-  if (!rec) return err(404, "Not found or expired");
-  if (!keyMatches(req.headers["x-host-key"], rec.keyHash)) return err(403, "Only the host can change this table");
+  const hostKey = req.headers["x-host-key"];
   if (action === "verify") {
     if (method !== "POST") return err(405, "Method not allowed");
-    return json(200, { ok: true, epoch: rec.epoch ?? 1 });
+    const rec2 = await load(store, code);
+    if (!rec2) return gone(store, code);
+    if (!keyMatches(hostKey, rec2.keyHash)) return err(403, "Only the host can change this table");
+    return json(200, { ok: true, epoch: rec2.epoch ?? 1 });
   }
   if (action === "offer") {
     if (method === "DELETE") {
-      const next2 = { ...rec, rev: rec.rev + 1, offer: void 0 };
-      await store.set(`share:${code}`, JSON.stringify(next2), SHARE_TTL_SECONDS);
-      return json(200, { ok: true });
+      return mutate(store, code, now, async (rec2) => {
+        if (!rec2) return { res: await gone(store, code) };
+        if (!keyMatches(hostKey, rec2.keyHash)) return { res: err(403, "Only the host can change this table") };
+        return { next: { ...rec2, rev: rec2.rev + 1, offer: void 0 }, res: json(200, { ok: true }) };
+      });
     }
     if (method !== "POST") return err(405, "Method not allowed");
     if (await limited(store, `rl:write:${code}`, limits.write)) return err(429, "Too many updates");
     const kind = body.kind;
-    let offer;
-    let token;
-    if (kind === "seat") {
-      const playerId = typeof body.playerId === "string" ? body.playerId : "";
-      if (!rec.snapshot.players.some((p) => p.id === playerId)) return err(400, "Unknown player");
-      offer = { kind: "seat", playerId, expiresAt: now + OFFER_TTL_MS };
-    } else if (kind === "link") {
-      token = randomBytes(18).toString("base64url");
-      offer = { kind: "link", tokenHash: sha256hex(token), expiresAt: now + OFFER_TTL_MS };
-    } else {
+    if (kind !== "seat" && kind !== "link") {
+      const rec2 = await load(store, code);
+      if (!rec2) return gone(store, code);
+      if (!keyMatches(hostKey, rec2.keyHash)) return err(403, "Only the host can change this table");
       return err(400, "Invalid offer");
     }
-    const next = { ...rec, rev: rec.rev + 1, offer };
-    await store.set(`share:${code}`, JSON.stringify(next), SHARE_TTL_SECONDS);
-    return json(201, { offer: publicOffer(next, now), token, rev: next.rev });
+    return mutate(store, code, now, async (rec2) => {
+      if (!rec2) return { res: await gone(store, code) };
+      if (!keyMatches(hostKey, rec2.keyHash)) return { res: err(403, "Only the host can change this table") };
+      let offer;
+      let token;
+      if (kind === "seat") {
+        const playerId = typeof body.playerId === "string" ? body.playerId : "";
+        if (!rec2.snapshot.players.some((p) => p.id === playerId)) return { res: err(400, "Unknown player") };
+        offer = { kind: "seat", playerId, expiresAt: now + OFFER_TTL_MS };
+      } else {
+        token = randomBytes(18).toString("base64url");
+        offer = { kind: "link", tokenHash: sha256hex(token), expiresAt: now + OFFER_TTL_MS };
+      }
+      const next = { ...rec2, rev: rec2.rev + 1, offer };
+      return { next, res: json(201, { offer: publicOffer(next, now), token, rev: next.rev }) };
+    });
   }
   if (action === "approve") {
     if (method !== "POST") return err(405, "Method not allowed");
-    const offer = liveOffer(rec, now);
-    if (!offer || offer.kind !== "seat" || !offer.claim) return err(409, "Nobody has accepted");
-    if (body.approve === true) {
-      const next2 = { ...rec, keyHash: offer.claim.keyHash, epoch: (rec.epoch ?? 1) + 1, rev: rec.rev + 1, offer: void 0 };
-      await store.set(`share:${code}`, JSON.stringify(next2), SHARE_TTL_SECONDS);
-      return json(200, { ok: true, epoch: next2.epoch });
-    }
-    const next = { ...rec, rev: rec.rev + 1, offer: { ...offer, claim: void 0 } };
-    await store.set(`share:${code}`, JSON.stringify(next), SHARE_TTL_SECONDS);
-    return json(200, { ok: true, declined: true });
+    return mutate(store, code, now, async (rec2) => {
+      if (!rec2) return { res: await gone(store, code) };
+      if (!keyMatches(hostKey, rec2.keyHash)) return { res: err(403, "Only the host can change this table") };
+      const offer = liveOffer(rec2, now);
+      if (!offer || offer.kind !== "seat" || !offer.claim) return { res: err(409, "Nobody has accepted") };
+      if (body.approve === true) {
+        const next = { ...rec2, keyHash: offer.claim.keyHash, epoch: (rec2.epoch ?? 1) + 1, rev: rec2.rev + 1, offer: void 0 };
+        return { next, res: json(200, { ok: true, epoch: next.epoch }) };
+      }
+      return { next: { ...rec2, rev: rec2.rev + 1, offer: { ...offer, claim: void 0 } }, res: json(200, { ok: true, declined: true }) };
+    });
   }
+  const rec = await load(store, code);
+  if (!rec) return gone(store, code);
+  if (!keyMatches(hostKey, rec.keyHash)) return err(403, "Only the host can change this table");
   return err(400, "Unknown action");
 }
 function memoryStore(clock = Date.now) {
@@ -286,6 +402,7 @@ function memoryStore(clock = Date.now) {
     return e;
   };
   return {
+    kind: "memory",
     async get(k) {
       return live(k)?.v ?? null;
     },
@@ -294,6 +411,16 @@ function memoryStore(clock = Date.now) {
     },
     async del(k) {
       data.delete(k);
+    },
+    async setIf(k, v, ttl, expected) {
+      if ((live(k)?.v ?? null) !== expected) return false;
+      data.set(k, { v, exp: clock() + ttl * 1e3 });
+      return true;
+    },
+    async delIf(k, expected) {
+      if (live(k)?.v !== expected) return false;
+      data.delete(k);
+      return true;
     },
     async incr(k, ttl) {
       const e = live(k);
@@ -308,9 +435,11 @@ function memoryStore(clock = Date.now) {
 }
 
 // server/store.ts
-function upstash(url, token) {
+var SET_IF = "local c = redis.call('GET', KEYS[1]); if (c == false and ARGV[1] == '') or c == ARGV[1] then redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3]); return 1 end; return 0";
+var DEL_IF = "if redis.call('GET', KEYS[1]) == ARGV[1] then redis.call('DEL', KEYS[1]); return 1 end; return 0";
+function upstash(url, token, fetchImpl = fetch) {
   const cmd = async (args) => {
-    const res = await fetch(url, {
+    const res = await fetchImpl(url, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify(args)
@@ -319,6 +448,7 @@ function upstash(url, token) {
     return (await res.json()).result;
   };
   return {
+    kind: "redis",
     async get(key) {
       return await cmd(["GET", key]) ?? null;
     },
@@ -328,20 +458,38 @@ function upstash(url, token) {
     async del(key) {
       await cmd(["DEL", key]);
     },
+    // Compare-and-set as small Lua scripts so the check and the write are one atomic step on the Redis server.
+    async setIf(key, value, ttl, expected) {
+      return Number(await cmd(["EVAL", SET_IF, 1, key, expected ?? "", value, ttl])) === 1;
+    },
+    async delIf(key, expected) {
+      return Number(await cmd(["EVAL", DEL_IF, 1, key, expected])) === 1;
+    },
     async incr(key, ttl) {
-      const n = Number(await cmd(["INCR", key]));
-      if (n === 1) await cmd(["EXPIRE", key, ttl]);
-      return n;
+      await cmd(["SET", key, 0, "EX", ttl, "NX"]);
+      return Number(await cmd(["INCR", key]));
     }
   };
 }
+function unconfiguredStore() {
+  const fail = async () => {
+    throw new StorageNotConfigured();
+  };
+  return { kind: "unconfigured", get: fail, set: fail, del: fail, setIf: fail, delIf: fail, incr: fail };
+}
+function pickStore(env, fetchImpl = fetch) {
+  const url = env.UPSTASH_REDIS_REST_URL ?? env.KV_REST_API_URL;
+  const token = env.UPSTASH_REDIS_REST_TOKEN ?? env.KV_REST_API_TOKEN;
+  if (url && token) return upstash(url, token, fetchImpl);
+  if (env.VERCEL && env.ALLOW_MEMORY_STORE !== "1") {
+    console.error("[share] Sharing storage is NOT configured: connect Upstash Redis to this Vercel project (Storage tab) and redeploy. Sharing is disabled until then.");
+    return unconfiguredStore();
+  }
+  return memoryStore();
+}
 var cached;
 function getStore() {
-  if (cached) return cached;
-  const url = process.env.UPSTASH_REDIS_REST_URL ?? process.env.KV_REST_API_URL;
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN ?? process.env.KV_REST_API_TOKEN;
-  cached = url && token ? upstash(url, token) : memoryStore();
-  return cached;
+  return cached ??= pickStore(process.env);
 }
 
 // server/vercel.ts

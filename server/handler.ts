@@ -2,7 +2,7 @@
 // middleware and the unit tests all call this, so the permission rules live in exactly one place.
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import {
-  CODE_ALPHABET, CODE_LENGTH, KEY_HASH_RE, OFFER_TTL_MS, SHARE_TTL_SECONDS, normalizeCode, sanitizeSnapshot,
+  CODE_ALPHABET, CODE_LENGTH, KEY_HASH_RE, OFFER_TTL_MS, SHARE_TTL_SECONDS, normalizeCode, pickTtl, sanitizeSnapshot,
   type PublicOffer, type SharedSnapshot
 } from '../src/shared';
 
@@ -15,10 +15,21 @@ export interface ApiRequest {
 }
 export interface ApiResponse { status: number; body: unknown; headers?: Record<string, string> }
 
+/** Thrown by a store that has no real backend (production without Redis): never silently use memory. */
+export class StorageNotConfigured extends Error {
+  constructor() { super('Sharing storage is not configured'); this.name = 'StorageNotConfigured'; }
+}
+
 export interface Store {
+  /** which backend this is, for the health check */
+  readonly kind?: 'redis' | 'memory' | 'unconfigured';
   get(key: string): Promise<string | null>;
   set(key: string, value: string, ttlSeconds: number): Promise<void>;
   del(key: string): Promise<void>;
+  /** Writes only if the key currently holds exactly `expected` (null = must not exist). Atomic. */
+  setIf(key: string, value: string, ttlSeconds: number, expected: string | null): Promise<boolean>;
+  /** Deletes only if the key currently holds exactly `expected`. Atomic. */
+  delIf(key: string, expected: string): Promise<boolean>;
   /** Increments a counter that expires `ttlSeconds` after its first increment; returns the new value. */
   incr(key: string, ttlSeconds: number): Promise<number>;
 }
@@ -39,8 +50,14 @@ interface Record_ {
   createdAt: number;
   /** increments every time the host key changes hands */
   epoch?: number;
+  /** when the store will drop this record (ms since epoch); refreshed by every write */
+  expiresAt?: number;
+  /** the host's chosen rolling lifetime in seconds (missing on old records = 7 days) */
+  ttl?: number;
   offer?: Offer;
 }
+
+const ttlOf = (rec: { ttl?: number } | null | undefined) => pickTtl(rec?.ttl);
 
 export const MAX_BODY_BYTES = 32 * 1024;
 export const LIMITS = {
@@ -48,8 +65,7 @@ export const LIMITS = {
   write: { max: 1500, window: 3600 },      // host pushes per code per hour
   read: { max: 20000, window: 3600 },      // polls per IP per hour (a household shares one IP)
   miss: { max: 40, window: 3600 },         // unknown-code lookups per IP per hour: stops code guessing
-  claim: { max: 40, window: 3600 },        // handover claims per IP per hour
-  claimCode: { max: 60, window: 3600 }     // handover claims per code per hour (stops token guessing)
+  claim: { max: 40, window: 3600 }         // per IP per hour: seat requests and FAILED token attempts (a valid token is never throttled)
 };
 
 const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
@@ -89,6 +105,49 @@ function publicOffer(rec: Record_, now: number): PublicOffer | undefined {
   return { kind: o.kind, playerId: o.playerId, expiresAt: o.expiresAt, status: o.claim ? 'claimed' : 'open' };
 }
 
+interface Step { next?: Record_; remove?: boolean; res: ApiResponse }
+
+/**
+ * The ONLY way a stored table changes after creation. Read the record, decide, and write it back only if nobody
+ * changed it in between (compare-and-set); otherwise start over from the fresh record. This is what makes two
+ * phones using the same hand-over code at the same moment resolve to exactly one winner, and stops a stale host
+ * save from bringing the old key back. Every write also refreshes the stored lifetime and the reported expiry.
+ * `fn` runs again on a retry, so it must not have side effects (rate limits are applied before calling this).
+ */
+async function mutate(
+  store: Store, code: string, now: number,
+  fn: (rec: Record_ | null) => Step | Promise<Step>
+): Promise<ApiResponse> {
+  const key = `share:${code}`;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const raw = await store.get(key);
+    let rec: Record_ | null = null;
+    if (raw) { try { rec = JSON.parse(raw) as Record_; } catch { rec = null; } }
+    const step = await fn(rec);
+    if (step.remove && raw) {
+      if (await store.delIf(key, raw)) {
+        await store.set(`tomb:${code}`, '1', SHARE_TTL_SECONDS); // so viewers can be told it was stopped, not expired
+        return step.res;
+      }
+      continue;
+    }
+    if (!step.next) return step.res;
+    const ttl = ttlOf(step.next);
+    step.next.expiresAt = now + ttl * 1000;
+    if (await store.setIf(key, JSON.stringify(step.next), ttl, raw)) return step.res;
+  }
+  return err(409, 'The table is busy — try again');
+}
+
+/** A missing record is either one the host stopped on purpose (tombstone) or expired/unknown. */
+async function gone(store: Store, code: string): Promise<ApiResponse> {
+  const stopped = (await store.get(`tomb:${code}`)) !== null;
+  return json(404, {
+    error: stopped ? 'The host stopped sharing this table' : 'Not found or expired',
+    reason: stopped ? 'stopped' : 'expired_or_unknown'
+  });
+}
+
 async function limited(store: Store, key: string, rule: { max: number; window: number }): Promise<boolean> {
   return (await store.incr(key, rule.window)) > rule.max;
 }
@@ -104,12 +163,21 @@ export async function handleShare(req: ApiRequest, store: Store, now = Date.now(
       if (await limited(store, `rl:create:${ip}`, limits.create)) return err(429, 'Too many new shares, try again later');
       const snapshot = sanitizeSnapshot((req.body as { snapshot?: unknown } | null)?.snapshot, now);
       if (!snapshot) return err(400, 'Invalid session');
-      let code = newCode();
-      for (let i = 0; i < 5 && (await store.get(`share:${code}`)); i++) code = newCode();
       const hostKey = randomBytes(24).toString('base64url');
-      const rec: Record_ = { keyHash: sha256(hostKey), snapshot, rev: 1, createdAt: now, epoch: 1 };
-      await store.set(`share:${code}`, JSON.stringify(rec), SHARE_TTL_SECONDS);
-      return json(201, { code, hostKey, rev: 1, epoch: 1, expiresAt: now + SHARE_TTL_SECONDS * 1000 });
+      const ttl = pickTtl((req.body as { ttlSeconds?: unknown } | null)?.ttlSeconds);
+      const rec: Record_ = { keyHash: sha256(hostKey), snapshot, rev: 1, createdAt: now, epoch: 1, ttl, expiresAt: now + ttl * 1000 };
+      for (let i = 0; i < 5; i++) {
+        const code = newCode();
+        if (await store.setIf(`share:${code}`, JSON.stringify(rec), ttl, null)) {
+          return json(201, { code, hostKey, rev: 1, epoch: 1, ttl, expiresAt: rec.expiresAt });
+        }
+      }
+      return err(500, 'Could not allocate a code');
+    }
+
+    if (method === 'GET' && req.query.action === 'health' && !req.query.code) {
+      await store.get('health:ping'); // throws StorageNotConfigured when there is no backend
+      return json(200, { ok: true, store: store.kind ?? 'unknown' });
     }
 
     const code = normalizeCode(req.query.code);
@@ -121,33 +189,47 @@ export async function handleShare(req: ApiRequest, store: Store, now = Date.now(
       if (await limited(store, `rl:read:${ip}`, limits.read)) return err(429, 'Too many requests');
       const rec = await load(store, code);
       if (!rec) {
-        if (await limited(store, `rl:miss:${ip}`, limits.miss)) return err(429, 'Too many requests');
-        return err(404, 'Not found or expired');
+        const g = await gone(store, code);
+        // only genuinely unknown codes count towards the guessing limit
+        if ((g.body as { reason: string }).reason !== 'stopped' && await limited(store, `rl:miss:${ip}`, limits.miss)) return err(429, 'Too many requests');
+        return g;
       }
       const since = Number(req.query.since);
       if (Number.isFinite(since) && since === rec.rev) return json(200, { unchanged: true, rev: rec.rev });
       // The host key hash never leaves the server.
       return json(200, {
         snapshot: rec.snapshot, rev: rec.rev, epoch: rec.epoch ?? 1, offer: publicOffer(rec, now),
-        expiresAt: rec.snapshot.updatedAt + SHARE_TTL_SECONDS * 1000
+        ttl: ttlOf(rec), expiresAt: rec.expiresAt ?? rec.snapshot.updatedAt + ttlOf(rec) * 1000
       });
     }
 
     if (method === 'PUT' || method === 'DELETE') {
-      const rec = await load(store, code);
-      if (!rec) return err(404, 'Not found or expired');
-      if (!keyMatches(req.headers['x-host-key'], rec.keyHash)) return err(403, 'Only the host can change this table');
-      if (method === 'DELETE') { await store.del(`share:${code}`); return json(200, { ok: true }); }
-      if (await limited(store, `rl:write:${code}`, limits.write)) return err(429, 'Too many updates');
-      const snapshot = sanitizeSnapshot((req.body as { snapshot?: unknown } | null)?.snapshot, now);
-      if (!snapshot) return err(400, 'Invalid session');
-      const next: Record_ = { ...rec, snapshot, rev: rec.rev + 1 };
-      await store.set(`share:${code}`, JSON.stringify(next), SHARE_TTL_SECONDS); // rolling 7 days from the last host edit
-      return json(200, { rev: next.rev, epoch: next.epoch ?? 1, expiresAt: now + SHARE_TTL_SECONDS * 1000 });
+      const hostKey = req.headers['x-host-key'];
+      if (method === 'PUT') {
+        if (await limited(store, `rl:write:${code}`, limits.write)) return err(429, 'Too many updates');
+        const snapshot = sanitizeSnapshot((req.body as { snapshot?: unknown } | null)?.snapshot, now);
+        if (!snapshot) return err(400, 'Invalid session');
+        return mutate(store, code, now, async rec => {
+          if (!rec) return { res: await gone(store, code) };
+          if (!keyMatches(hostKey, rec.keyHash)) return { res: err(403, 'Only the host can change this table') };
+          const next: Record_ = { ...rec, snapshot, rev: rec.rev + 1 };
+          // The host may change the lifetime later ("Extend"); only a listed value counts, otherwise it is kept.
+          next.ttl = pickTtl((req.body as { ttlSeconds?: unknown } | null)?.ttlSeconds, ttlOf(rec));
+          return { next, res: json(200, { rev: next.rev, epoch: next.epoch ?? 1, ttl: next.ttl, expiresAt: now + next.ttl * 1000 }) };
+        });
+      }
+      return mutate(store, code, now, async rec => {
+        if (!rec) return { res: await gone(store, code) };
+        if (!keyMatches(hostKey, rec.keyHash)) return { res: err(403, 'Only the host can change this table') };
+        return { remove: true, res: json(200, { ok: true }) };
+      });
     }
 
     return { ...err(405, 'Method not allowed'), headers: { Allow: 'GET, POST, PUT, DELETE', 'Cache-Control': 'no-store' } };
-  } catch {
+  } catch (e) {
+    if (e instanceof StorageNotConfigured) {
+      return json(503, { error: 'Sharing storage is not configured on this server', reason: 'storage_not_configured' });
+    }
     return err(500, 'Server error');
   }
 }
@@ -171,84 +253,104 @@ async function handleAction(
 
   if (action === 'claim') {
     if (method !== 'POST') return err(405, 'Method not allowed');
-    if (await limited(store, `rl:claim:${ip}`, limits.claim) || await limited(store, `rl:claimcode:${code}`, limits.claimCode)) {
-      return err(429, 'Too many attempts, try again later');
-    }
-    const rec = await load(store, code);
-    if (!rec) return err(404, 'Not found or expired');
-    const offer = liveOffer(rec, now);
-    if (!offer) return err(404, 'No hand-over is open');
     const keyHash = typeof body.keyHash === 'string' ? body.keyHash : '';
     if (!KEY_HASH_RE.test(keyHash)) return err(400, 'Invalid key');
+    const token = typeof body.token === 'string' ? body.token : '';
 
-    if (offer.kind === 'link') {
-      const token = typeof body.token === 'string' ? body.token : '';
-      if (!token || token.length > 200 || !offer.tokenHash || !keyMatches(token, offer.tokenHash)) {
-        return err(403, 'This hand-over code is not valid');
+    // Throttling is per IP and only for seat requests and FAILED token guesses: a bystander can no longer use up a
+    // shared per-code budget to lock the host's own QR out, and a valid token always gets through.
+    const throttled = () => limited(store, `rl:claim:${ip}`, limits.claim);
+    let counted = false;
+    const countOnce = async () => { if (counted) return false; counted = true; return throttled(); };
+
+    return mutate(store, code, now, async rec => {
+      if (!rec) return { res: await gone(store, code) };
+      const offer = liveOffer(rec, now);
+      if (!offer) return { res: err(404, 'No hand-over is open') };
+
+      if (offer.kind === 'link') {
+        if (!token || token.length > 200 || !offer.tokenHash || !keyMatches(token, offer.tokenHash)) {
+          return { res: (await countOnce()) ? err(429, 'Too many attempts, try again later') : err(403, 'This hand-over code is not valid') };
+        }
+        const next: Record_ = { ...rec, keyHash, epoch: (rec.epoch ?? 1) + 1, rev: rec.rev + 1, offer: undefined };
+        return { next, res: json(200, { ok: true, snapshot: next.snapshot, rev: next.rev, epoch: next.epoch }) };
       }
-      const next: Record_ = { ...rec, keyHash, epoch: (rec.epoch ?? 1) + 1, rev: rec.rev + 1, offer: undefined };
-      await store.set(`share:${code}`, JSON.stringify(next), SHARE_TTL_SECONDS);
-      return json(200, { ok: true, snapshot: next.snapshot, rev: next.rev, epoch: next.epoch });
-    }
 
-    // seat offer: needs the host to confirm, so it only records the claim
-    if (offer.claim && now - offer.claim.at < 2 * 60 * 1000) return err(409, 'Someone else already accepted — wait for the host');
-    const next: Record_ = { ...rec, rev: rec.rev + 1, offer: { ...offer, claim: { keyHash, at: now } } };
-    await store.set(`share:${code}`, JSON.stringify(next), SHARE_TTL_SECONDS);
-    return json(200, { ok: true, rev: next.rev });
+      // seat offer: needs the host to confirm, so it only records the claim
+      if (offer.claim && now - offer.claim.at < 2 * 60 * 1000) return { res: err(409, 'Someone else already accepted — wait for the host') };
+      if (await countOnce()) return { res: err(429, 'Too many attempts, try again later') };
+      const next: Record_ = { ...rec, rev: rec.rev + 1, offer: { ...offer, claim: { keyHash, at: now } } };
+      return { next, res: json(200, { ok: true, rev: next.rev }) };
+    });
   }
 
   // everything below is host-only
-  const rec = await load(store, code);
-  if (!rec) return err(404, 'Not found or expired');
-  if (!keyMatches(req.headers['x-host-key'], rec.keyHash)) return err(403, 'Only the host can change this table');
+  const hostKey = req.headers['x-host-key'];
 
   if (action === 'verify') {
     if (method !== 'POST') return err(405, 'Method not allowed');
+    const rec = await load(store, code);
+    if (!rec) return gone(store, code);
+    if (!keyMatches(hostKey, rec.keyHash)) return err(403, 'Only the host can change this table');
     return json(200, { ok: true, epoch: rec.epoch ?? 1 });
   }
 
   if (action === 'offer') {
     if (method === 'DELETE') {
-      const next: Record_ = { ...rec, rev: rec.rev + 1, offer: undefined };
-      await store.set(`share:${code}`, JSON.stringify(next), SHARE_TTL_SECONDS);
-      return json(200, { ok: true });
+      return mutate(store, code, now, async rec => {
+        if (!rec) return { res: await gone(store, code) };
+        if (!keyMatches(hostKey, rec.keyHash)) return { res: err(403, 'Only the host can change this table') };
+        return { next: { ...rec, rev: rec.rev + 1, offer: undefined }, res: json(200, { ok: true }) };
+      });
     }
     if (method !== 'POST') return err(405, 'Method not allowed');
     if (await limited(store, `rl:write:${code}`, limits.write)) return err(429, 'Too many updates');
     const kind = body.kind;
-    let offer: Offer;
-    let token: string | undefined;
-    if (kind === 'seat') {
-      const playerId = typeof body.playerId === 'string' ? body.playerId : '';
-      if (!rec.snapshot.players.some(p => p.id === playerId)) return err(400, 'Unknown player');
-      offer = { kind: 'seat', playerId, expiresAt: now + OFFER_TTL_MS };
-    } else if (kind === 'link') {
-      token = randomBytes(18).toString('base64url');
-      offer = { kind: 'link', tokenHash: sha256hex(token), expiresAt: now + OFFER_TTL_MS };
-    } else {
+    if (kind !== 'seat' && kind !== 'link') {
+      // still answer 403 to non-hosts before revealing anything about validation
+      const rec = await load(store, code);
+      if (!rec) return gone(store, code);
+      if (!keyMatches(hostKey, rec.keyHash)) return err(403, 'Only the host can change this table');
       return err(400, 'Invalid offer');
     }
-    const next: Record_ = { ...rec, rev: rec.rev + 1, offer };
-    await store.set(`share:${code}`, JSON.stringify(next), SHARE_TTL_SECONDS);
-    // the token is returned exactly once, to the host who asked for it
-    return json(201, { offer: publicOffer(next, now), token, rev: next.rev });
+    return mutate(store, code, now, async rec => {
+      if (!rec) return { res: await gone(store, code) };
+      if (!keyMatches(hostKey, rec.keyHash)) return { res: err(403, 'Only the host can change this table') };
+      let offer: Offer;
+      let token: string | undefined;
+      if (kind === 'seat') {
+        const playerId = typeof body.playerId === 'string' ? body.playerId : '';
+        if (!rec.snapshot.players.some(p => p.id === playerId)) return { res: err(400, 'Unknown player') };
+        offer = { kind: 'seat', playerId, expiresAt: now + OFFER_TTL_MS };
+      } else {
+        token = randomBytes(18).toString('base64url');
+        offer = { kind: 'link', tokenHash: sha256hex(token), expiresAt: now + OFFER_TTL_MS };
+      }
+      const next: Record_ = { ...rec, rev: rec.rev + 1, offer };
+      // the token is returned exactly once, to the host who asked for it
+      return { next, res: json(201, { offer: publicOffer(next, now), token, rev: next.rev }) };
+    });
   }
 
   if (action === 'approve') {
     if (method !== 'POST') return err(405, 'Method not allowed');
-    const offer = liveOffer(rec, now);
-    if (!offer || offer.kind !== 'seat' || !offer.claim) return err(409, 'Nobody has accepted');
-    if (body.approve === true) {
-      const next: Record_ = { ...rec, keyHash: offer.claim.keyHash, epoch: (rec.epoch ?? 1) + 1, rev: rec.rev + 1, offer: undefined };
-      await store.set(`share:${code}`, JSON.stringify(next), SHARE_TTL_SECONDS);
-      return json(200, { ok: true, epoch: next.epoch });
-    }
-    const next: Record_ = { ...rec, rev: rec.rev + 1, offer: { ...offer, claim: undefined } };
-    await store.set(`share:${code}`, JSON.stringify(next), SHARE_TTL_SECONDS);
-    return json(200, { ok: true, declined: true });
+    return mutate(store, code, now, async rec => {
+      if (!rec) return { res: await gone(store, code) };
+      if (!keyMatches(hostKey, rec.keyHash)) return { res: err(403, 'Only the host can change this table') };
+      const offer = liveOffer(rec, now);
+      if (!offer || offer.kind !== 'seat' || !offer.claim) return { res: err(409, 'Nobody has accepted') };
+      if (body.approve === true) {
+        const next: Record_ = { ...rec, keyHash: offer.claim.keyHash, epoch: (rec.epoch ?? 1) + 1, rev: rec.rev + 1, offer: undefined };
+        return { next, res: json(200, { ok: true, epoch: next.epoch }) };
+      }
+      return { next: { ...rec, rev: rec.rev + 1, offer: { ...offer, claim: undefined } }, res: json(200, { ok: true, declined: true }) };
+    });
   }
 
+  // unknown actions: stay quiet for non-hosts, as before
+  const rec = await load(store, code);
+  if (!rec) return gone(store, code);
+  if (!keyMatches(hostKey, rec.keyHash)) return err(403, 'Only the host can change this table');
   return err(400, 'Unknown action');
 }
 
@@ -262,9 +364,20 @@ export function memoryStore(clock: () => number = Date.now): Store & { size(): n
     return e;
   };
   return {
+    kind: 'memory' as const,
     async get(k) { return live(k)?.v ?? null; },
     async set(k, v, ttl) { data.set(k, { v, exp: clock() + ttl * 1000 }); },
     async del(k) { data.delete(k); },
+    async setIf(k, v, ttl, expected) {
+      if ((live(k)?.v ?? null) !== expected) return false;
+      data.set(k, { v, exp: clock() + ttl * 1000 });
+      return true;
+    },
+    async delIf(k, expected) {
+      if (live(k)?.v !== expected) return false;
+      data.delete(k);
+      return true;
+    },
     async incr(k, ttl) {
       const e = live(k);
       const n = e ? Number(e.v) + 1 : 1;

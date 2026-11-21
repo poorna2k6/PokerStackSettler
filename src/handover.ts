@@ -36,10 +36,35 @@ function setPending(p: Pending | null) {
 
 const myShare = () => state.session.share;
 
+const netTrouble = (e: unknown) => {
+  const m = (e as Error)?.message ?? '';
+  return /Failed to fetch|Load failed|NetworkError|network/i.test(m) || (e as Error)?.name === 'AbortError'
+    ? 'Couldn’t reach the server — check your connection and try again.'
+    : (m || 'Something went wrong — try again.');
+};
+
+/** After a reload the host's phone forgets an open offer, but the server still has it: pick it up again. */
+async function resumePending() {
+  const share = myShare();
+  if (!share || pending) return;
+  try {
+    const r = await call<{ offer?: PublicOffer }>('GET', `?code=${share.code}`);
+    const o = r.status === 200 ? r.data.offer : undefined;
+    if (o && o.expiresAt > Date.now()) {
+      const name = state.session.players.find(p => p.id === o.playerId)?.name;
+      setPending({ kind: o.kind, playerId: o.playerId, name, url: undefined, expiresAt: o.expiresAt, status: o.status });
+    }
+  } catch { /* offline: nothing to resume */ }
+}
+
 async function withdraw() {
   const share = myShare();
   setPending(null);
   if (share) { try { await call('DELETE', `?code=${share.code}&action=offer`, undefined, share.hostKey); } catch { /* it expires on its own */ } }
+}
+
+async function guarded(fn: () => Promise<void>) {
+  try { await fn(); } catch (e) { toast(netTrouble(e), 'error'); }
 }
 
 /** Polls the table while an offer is open: sees a viewer accept, or notices the role moved. */
@@ -72,6 +97,9 @@ const fmtLeft = (ms: number) => {
 };
 
 async function offerToSeat(playerId: string, name: string) {
+  await guarded(() => offerToSeatRaw(playerId, name));
+}
+async function offerToSeatRaw(playerId: string, name: string) {
   const share = myShare();
   if (!share) return;
   const r = await call<{ offer?: PublicOffer; error?: string }>('POST', `?code=${share.code}&action=offer`, { kind: 'seat', playerId }, share.hostKey);
@@ -81,6 +109,9 @@ async function offerToSeat(playerId: string, name: string) {
 }
 
 async function offerByLink() {
+  await guarded(offerByLinkRaw);
+}
+async function offerByLinkRaw() {
   const share = myShare();
   if (!share) return;
   const r = await call<{ offer?: PublicOffer; token?: string; error?: string }>('POST', `?code=${share.code}&action=offer`, { kind: 'link' }, share.hostKey);
@@ -91,6 +122,9 @@ async function offerByLink() {
 }
 
 async function decide(approve: boolean) {
+  await guarded(() => decideRaw(approve));
+}
+async function decideRaw(approve: boolean) {
   const share = myShare();
   const who = pending?.name;
   if (!share) return;
@@ -107,6 +141,10 @@ let sheetOpen = false;
 export function openHandoverSheet() {
   if (sheetOpen || !myShare()) return;
   sheetOpen = true;
+  void resumePending().finally(showHandoverSheet);
+}
+
+function showHandoverSheet() {
   openSheet('Hand over the table', close => {
     const body = h('div', { class: 'sheet-body handover' });
     const redraw = () => { if (body.isConnected) draw(); };
@@ -125,30 +163,38 @@ export function openHandoverSheet() {
       if (pending && Date.now() >= pending.expiresAt) setPending(null);
     }, 1000);
 
-    function draw() {
+    let draw = () => {
       if (!pending) {
         const players = state.session.players;
         body.replaceChildren(
-          h('p', { class: 'muted', text: 'The new host takes over editing. You become a viewer, and everyone’s live link keeps working.' }),
+          h('p', { class: 'muted', text: 'The host is the only person who can change buy-ins and chips; everyone else just watches. Hand it over and you become a viewer — everyone’s live link keeps working.' }),
           h('h3', { class: 'hands-h', text: 'Hand to a player in the list' }),
           players.length === 0
             ? h('p', { class: 'muted small', text: 'No players yet.' })
             : group(...players.map(p => h('button', { class: 'row action', on: { click: () => void offerToSeat(p.id, p.name) } },
-                h('span', { class: 'grow', text: p.name }), h('span', { class: 'muted small', text: 'sends a request ›' })))),
-          h('p', { class: 'muted small', text: 'They see “Accept” on their live view (they need to be watching the link). You then confirm here.' }),
+                h('span', { class: 'grow', text: p.name }), h('span', { class: 'muted small', text: 'ask to take over ›' })))),
+          h('p', { class: 'muted small', text: 'They get an “Accept” button on the live link they’re watching. You then confirm here.' }),
           h('h3', { class: 'hands-h', text: 'Hand to someone new' }),
           h('button', { class: 'btn tinted block', text: '▦ Show QR code', on: { click: () => void offerByLink() } }),
-          h('p', { class: 'muted small', text: 'Works for anyone, even people not in the list. One use, 10 minutes.' }),
-          h('button', { class: 'btn plain block', text: 'Close', on: { click: close } }));
+          h('p', { class: 'muted small', text: 'Works for anyone, even people not in the list. One use, 10 minutes.' }));
         return;
       }
       const left = h('strong', { class: 'mono', text: fmtLeft(pending.expiresAt - Date.now()), attrs: { 'data-left': '' } });
+      if (pending.kind === 'link' && !pending.url) {
+        body.replaceChildren(
+          h('p', { class: 'center' }, h('strong', { text: 'A QR code is already open' })),
+          h('p', { class: 'muted small center', text: 'It was created before this page was reloaded, so it can’t be shown again.' }),
+          h('p', { class: 'center muted small' }, 'Expires in ', left),
+          h('button', { class: 'btn primary block', text: 'Make a new QR code', on: { click: () => { void offerByLink(); } } }),
+          h('button', { class: 'btn danger block', text: 'Cancel hand-over', on: { click: () => { void withdraw(); } } }));
+        return;
+      }
       if (pending.kind === 'link' && pending.url) {
         const url = pending.url;
         const input = h('input', { attrs: { type: 'text', readonly: true, value: url, 'aria-label': 'One-time hand-over link', spellcheck: false }, on: { focus: () => input.select() } });
         input.value = url;
         body.replaceChildren(
-          h('p', { class: 'muted', text: 'Ask the new host to scan this with their camera, then tap “Become host”.' }),
+          h('p', { class: 'muted', text: 'Ask the new host to scan this with their camera (or send them the link), then tap “Become host”. This phone then becomes a viewer.' }),
           h('div', { class: 'qr-box' }, renderQr(url, 'QR code to take over this table')),
           h('p', { class: 'center muted small' }, 'Expires in ', left, ' · works once'),
           group(h('label', { class: 'row field' }, h('span', { text: 'Link' }), input)),
@@ -160,19 +206,26 @@ export function openHandoverSheet() {
       }
       if (pending.status === 'claimed') {
         body.replaceChildren(
-          h('p', { class: 'center' }, h('strong', { text: `${pending.name ?? 'A player'} accepted.` })),
+          h('p', { class: 'center', attrs: { 'aria-live': 'polite' } }, h('strong', { text: `${pending.name ?? 'A player'} accepted.` })),
           h('p', { class: 'muted', text: 'Make them the host? You’ll become a viewer and they can edit the table from their phone.' }),
           h('button', { class: 'btn primary block', text: `Make ${pending.name ?? 'them'} the host`, on: { click: () => { void decide(true); } } }),
           h('button', { class: 'btn plain block', text: 'Not now', on: { click: () => { void decide(false); } } }));
         return;
       }
       body.replaceChildren(
-        h('p', { class: 'center' }, h('strong', { text: `Waiting for ${pending.name ?? 'the player'} to accept…` })),
+        h('p', { class: 'center', attrs: { 'aria-live': 'polite' } }, h('strong', { text: `Waiting for ${pending.name ?? 'the player'} to accept…` })),
         h('p', { class: 'muted small center', text: 'They need to open the live link; they will see an Accept button there.' }),
         h('p', { class: 'center muted small' }, 'Expires in ', left),
         h('button', { class: 'btn danger block', text: 'Cancel request', on: { click: () => { void withdraw(); } } }),
-        h('button', { class: 'btn plain block', text: 'Close (keep waiting)', on: { click: close } }));
+        h('button', { class: 'btn plain block', text: 'Keep waiting', on: { click: close } }));
     }
+    const drawAndFocus = draw;
+    draw = () => {
+      drawAndFocus();
+      // keep keyboard focus inside the sheet after every redraw (the old controls were replaced)
+      // (deferred a frame: on the first draw the sheet is not attached to the page yet)
+      requestAnimationFrame(() => (body.querySelector('button.primary, button.danger, .row.action, input, button') as HTMLElement | null)?.focus({ preventScroll: true }));
+    };
     draw();
     return body;
   });
@@ -210,7 +263,7 @@ export async function openTakeoverSheet(code: string, token: string) {
         if (r.status === 200 && r.data.snapshot) { await adoptFrom(code, key, r.data.snapshot); return; }
         toast(r.status === 403 || r.status === 404 ? 'This hand-over code was already used or has expired' : (r.data?.error ?? 'Could not take over'), 'error');
       } catch (e) {
-        toast((e as Error).message || 'Could not reach the server', 'error');
+        toast(`${netTrouble(e)} If you scanned a QR code, scan it again.`, 'error');
       }
     }
   });
@@ -243,5 +296,7 @@ export function afterBoot() {
   const m = /^#\/h\/([A-Za-z0-9]{8})\.([A-Za-z0-9_-]{16,64})$/.exec(location.hash);
   if (m) { void openTakeoverSheet(m[1].toUpperCase(), m[2]); return; }
   void finishPendingTakeover();
+  // The host reloaded or reopened the app while someone had accepted: pick the offer back up and ask.
+  if (myShare() && !state.session.isDemo) void resumePending().then(() => { if (pending?.kind === 'seat' && pending.status === 'claimed') openHandoverSheet(); });
 }
 

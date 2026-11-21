@@ -1,5 +1,5 @@
 import { normalizeCode } from './shared';
-import { sanitizeBuyIn, sanitizePaid, sanitizePlayers, sanitizeSaved, toCents, uniqueSessionIds, type SavedSession, type SessionData } from './engine';
+import { sanitizeBills, sanitizeBuyIn, sanitizePaid, sanitizePlayers, sanitizeSaved, toCents, uniqueSessionIds, type SavedSession, type SessionData } from './engine';
 
 const VAULT_KEY = 'stacksettle_pro_vault_v2';
 const LIVE_KEY = 'stacksettle_live_autosave_v1';
@@ -61,14 +61,15 @@ export function loadLive(): SessionData | null {
     isDemo: o.isDemo === true,
     share: parseShare(o.share),
     players,
-    paid
+    paid,
+    bills: sanitizeBills(o.bills)
   };
 }
 
 export const saveLive = (s: SessionData) =>
   write(LIVE_KEY, {
     id: s.id, name: s.name, defaultBuyIn: s.defaultBuyIn, expenseCents: s.expenseCents,
-    isEnded: s.isEnded, isDemo: s.isDemo === true, share: s.share, players: s.players, paid: s.paid
+    isEnded: s.isEnded, isDemo: s.isDemo === true, share: s.share, players: s.players, paid: s.paid, bills: s.bills ?? []
   });
 
 export function loadVault(): SavedSession[] {
@@ -78,11 +79,12 @@ export function loadVault(): SavedSession[] {
 }
 export const saveVault = (v: SavedSession[]) => write(VAULT_KEY, v);
 
-export interface Prefs { sound: boolean; view: 'list' | 'table' }
+export interface Prefs { sound: boolean; view: 'list' | 'table'; /** ask before adding a buy-in or applying a chip fix */ confirmBuyIn: boolean }
 const PREFS_KEY = 'stacksettle_prefs_v1';
 
 export function loadPrefs(): Prefs {
   const o = read(PREFS_KEY) as Partial<Prefs> | null;
-  return { sound: o?.sound === true, view: o?.view === 'table' ? 'table' : 'list' };
+  // confirmBuyIn defaults to ON (also for anyone who saved preferences before this existed)
+  return { sound: o?.sound === true, view: o?.view === 'table' ? 'table' : 'list', confirmBuyIn: o?.confirmBuyIn !== false };
 }
 export const savePrefs = (p: Prefs) => write(PREFS_KEY, p);

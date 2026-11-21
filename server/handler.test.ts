@@ -125,6 +125,49 @@ describe('expiry and abuse limits', () => {
     expect(dead.status).toBe(404);
   });
 
+  it('honours a host-chosen lifetime, only from the allowed list', async () => {
+    const { call, clock } = setup();
+    const day = 24 * 3600 * 1000;
+    const short = (await create(call, { snapshot: snap(), ttlSeconds: 24 * 3600 } as never)).data;
+    expect((short as { ttl?: number }).ttl).toBe(86400);
+    const bad = (await create(call, { snapshot: snap(), ttlSeconds: 99999999999 } as never)).data; // not allowed -> default 7 days
+    expect((bad as { ttl?: number }).ttl).toBe(7 * 86400);
+    const long = (await create(call, { snapshot: snap(), ttlSeconds: 90 * 86400 } as never)).data;
+    clock.advance(2 * day);
+    expect((await call(req('GET', { query: { code: short.code } }))).status).toBe(404);
+    expect((await call(req('GET', { query: { code: bad.code } }))).status).toBe(200);
+    clock.advance(10 * day);
+    expect((await call(req('GET', { query: { code: bad.code } }))).status).toBe(404);
+    expect((await call(req('GET', { query: { code: long.code } }))).status).toBe(200);
+  });
+
+  it('lets only the host change the lifetime, and keeps it across edits and hand-over', async () => {
+    const { call } = setup();
+    const { data } = await create(call);
+    const put = (key: string, ttlSeconds?: number) => call(req('PUT', { query: { code: data.code }, headers: { 'x-host-key': key }, body: { snapshot: snap(), ttlSeconds } }));
+    expect((await put('wrong', 30 * 86400)).status).toBe(403);
+    const r = await put(data.hostKey, 30 * 86400);
+    expect((r.body as { ttl: number }).ttl).toBe(30 * 86400);
+    const again = await put(data.hostKey); // no ttl sent: kept
+    expect((again.body as { ttl: number }).ttl).toBe(30 * 86400);
+    const junk = await put(data.hostKey, 5); // not allowed: kept
+    expect((junk.body as { ttl: number }).ttl).toBe(30 * 86400);
+  });
+
+  it('carries extra expenses to viewers, cleans hostile ones, and the worst case still fits the body limit', async () => {
+    const { call } = setup();
+    const bills = [{ id: 'b1', label: 'Pizza', cents: 3000, payerId: 'a' }, { id: 'b2', label: '<img src=x onerror=1>', cents: 99999999999, guest: 'Sam' }, { label: 'junk', cents: -4, guest: 'x' }];
+    const { data } = await create(call, { snapshot: snap({ bills }) } as never);
+    const got = (await call(req('GET', { query: { code: data.code } }))).body as { snapshot: { bills: { cents: number; label: string }[] } };
+    expect(got.snapshot.bills).toHaveLength(2);
+    expect(got.snapshot.bills[1].cents).toBe(10_000_000);
+    // worst case: 60 long-named players, 30 long expenses, 8 guests
+    const many = Array.from({ length: 60 }, (_, i) => ({ id: `p_${i}_${'x'.repeat(40)}`, name: 'N'.repeat(40), buyInCents: 100000000, cashOutCents: 100000000 }));
+    const big = Array.from({ length: 30 }, (_, i) => ({ id: `b_${i}_${'y'.repeat(40)}`, label: 'L'.repeat(40), cents: 10_000_000, guest: `G${i % 8}${'g'.repeat(36)}` }));
+    const body = JSON.stringify({ snapshot: snap({ players: many, bills: big, paid: Object.fromEntries(Array.from({ length: 400 }, (_, i) => [`k${i}`.padEnd(60, 'z'), true])) }) });
+    expect(body.length).toBeLessThan(0.9 * 32 * 1024 * 3); // sanity: our client payload stays reasonable
+  });
+
   it('throttles code guessing per IP', async () => {
     const { call } = setup();
     let last = 0;
@@ -300,15 +343,21 @@ describe('hand-over', () => {
       expect((await act(env.call, data.code, 'claim', 'POST', { body: { token: second.token, keyHash: hashOf(newKey) } })).status).toBe(404);
     });
 
-    it('throttles token guessing per code', async () => {
+    it('throttles only failed guesses, per IP: a bystander cannot lock the host out, a valid token always works', async () => {
       const env = setup();
       const { data } = await create(env.call);
-      await linkOffer(env, data);
+      const { token } = await linkOffer(env, data);
       let last = 0;
-      for (let i = 0; i < 70; i++) {
-        last = (await act(env.call, data.code, 'claim', 'POST', { body: { token: `guess${i}`, keyHash: hashOf(newKey) }, ip: `10.0.0.${i % 250}` })).status;
+      for (let i = 0; i < 60; i++) {
+        last = (await act(env.call, data.code, 'claim', 'POST', { body: { token: `guess${i}`, keyHash: hashOf(newKey) }, ip: '66.6.6.6' })).status;
       }
-      expect(last).toBe(429);
+      expect(last).toBe(429);                                   // the noisy IP is throttled...
+      for (let i = 0; i < 80; i++) {                             // ...and other people's noise does not consume anything shared
+        await act(env.call, data.code, 'claim', 'POST', { body: { token: `x${i}`, keyHash: hashOf(newKey) }, ip: `77.7.${i % 200}.1` });
+      }
+      // the host's real QR still works, from a fresh IP and even from the throttled one
+      const ok = await act(env.call, data.code, 'claim', 'POST', { body: { token, keyHash: hashOf(newKey) }, ip: '66.6.6.6' });
+      expect(ok.status).toBe(200);
     });
   });
 
@@ -323,3 +372,166 @@ describe('hand-over', () => {
     expect((await act(env.call, data.code, 'verify', 'GET', { headers: hostHdr(data.hostKey) })).status).toBe(405);
   });
 });
+
+// ---------------------------------------------------------------------------------------------
+// Expiry hardening
+// ---------------------------------------------------------------------------------------------
+import { StorageNotConfigured, type Store } from './handler';
+
+describe('expiry reasons and honest expiry time', () => {
+  const DAY = 24 * 3600 * 1000;
+
+  it('a stopped table says "stopped", an unknown or expired one says "expired_or_unknown"', async () => {
+    const env = setup();
+    const { data } = await create(env.call);
+    await env.call(req('DELETE', { query: { code: data.code }, headers: { 'x-host-key': data.hostKey } }));
+    const stopped = await env.call(req('GET', { query: { code: data.code }, ip: '3.3.3.3' }));
+    expect(stopped.status).toBe(404);
+    expect((stopped.body as { reason: string }).reason).toBe('stopped');
+    const unknown = await env.call(req('GET', { query: { code: 'ZZZZZZZZ' }, ip: '3.3.3.4' }));
+    expect((unknown.body as { reason: string }).reason).toBe('expired_or_unknown');
+
+    const e2 = setup();
+    const c2 = await create(e2.call);
+    e2.clock.advance(8 * DAY);
+    const expired = await e2.call(req('GET', { query: { code: c2.data.code }, ip: '3.3.3.5' }));
+    expect(expired.status).toBe(404);
+    expect((expired.body as { reason: string }).reason).toBe('expired_or_unknown');
+  });
+
+  it('looking up a stopped table does not use up the code-guessing budget', async () => {
+    const env = setup();
+    const { data } = await create(env.call);
+    await env.call(req('DELETE', { query: { code: data.code }, headers: { 'x-host-key': data.hostKey } }));
+    let last = 0;
+    for (let i = 0; i < 60; i++) last = (await env.call(req('GET', { query: { code: data.code }, ip: '4.4.4.4' }))).status;
+    expect(last).toBe(404); // never 429
+  });
+
+  it('reports the real expiry, including after hand-over writes that refresh the stored lifetime', async () => {
+    const env = setup();
+    const { data } = await create(env.call);
+    env.clock.advance(3 * DAY);
+    await env.call(req('POST', { query: { code: data.code, action: 'offer' }, headers: { 'x-host-key': data.hostKey }, body: { kind: 'link' } }));
+    const view = await env.call(req('GET', { query: { code: data.code }, ip: '5.5.5.5' }));
+    const exp = (view.body as { expiresAt: number }).expiresAt;
+    expect(exp).toBe(env.clock.now() + 7 * DAY); // used to understate it (3 days too early)
+    // and the store really keeps it that long
+    env.clock.advance(6 * DAY);
+    expect((await env.call(req('GET', { query: { code: data.code }, ip: '5.5.5.6' }))).status).toBe(200);
+  });
+});
+
+describe('storage health and the unconfigured store', () => {
+  const unconfigured: Store = {
+    kind: 'unconfigured',
+    get: async () => { throw new StorageNotConfigured(); },
+    set: async () => { throw new StorageNotConfigured(); },
+    del: async () => { throw new StorageNotConfigured(); },
+    setIf: async () => { throw new StorageNotConfigured(); },
+    delIf: async () => { throw new StorageNotConfigured(); },
+    incr: async () => { throw new StorageNotConfigured(); }
+  };
+
+  it('health reports the backend; without one every call is a clear 503, not a random 404', async () => {
+    const ok = await handleShare(req('GET', { query: { action: 'health' } }), memoryStore());
+    expect(ok.status).toBe(200);
+    expect(ok.body).toMatchObject({ ok: true, store: 'memory' });
+
+    const health = await handleShare(req('GET', { query: { action: 'health' } }), unconfigured);
+    expect(health.status).toBe(503);
+    expect(health.body).toMatchObject({ reason: 'storage_not_configured' });
+    for (const r of [req('POST', { body: { snapshot: snap() } }), req('GET', { query: { code: 'ABCDEFGH' } }), req('PUT', { query: { code: 'ABCDEFGH' } })]) {
+      const res = await handleShare(r, unconfigured);
+      expect(res.status).toBe(503);
+      expect((res.body as { reason: string }).reason).toBe('storage_not_configured');
+    }
+  });
+
+  it('documents the failure mode the unconfigured store prevents: two memory instances disagree', async () => {
+    const a = memoryStore();
+    const b = memoryStore();
+    const made = await handleShare(req('POST', { body: { snapshot: snap() } }), a);
+    const code = (made.body as { code: string }).code;
+    expect((await handleShare(req('GET', { query: { code }, ip: '8.1.1.1' }), a)).status).toBe(200);
+    expect((await handleShare(req('GET', { query: { code }, ip: '8.1.1.2' }), b)).status).toBe(404);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Concurrency: the real production store has latency between read and write
+// ---------------------------------------------------------------------------------------------
+describe('atomic hand-over under concurrent requests', () => {
+  const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+  /** A store whose reads take a moment, like a network call, so concurrent requests interleave. */
+  function slow(inner: Store): Store {
+    return {
+      kind: inner.kind,
+      get: async k => { const v = await inner.get(k); await sleep(Math.random() * 6); return v; },
+      set: inner.set, del: inner.del, setIf: inner.setIf, delIf: inner.delIf, incr: inner.incr
+    };
+  }
+  const mk = () => {
+    const inner = memoryStore();
+    const store = slow(inner);
+    const call = (r: ApiRequest) => handleShare(r, store, Date.now());
+    return { call };
+  };
+  const key2 = 'm'.repeat(32);
+
+  it('two phones using the same QR at the same moment: exactly one wins and exactly one key is valid', async () => {
+    for (let round = 0; round < 15; round++) {
+      const { call } = mk();
+      ip++;
+      const made = (await call(req('POST', { body: { snapshot: snap() } }))).body as { code: string; hostKey: string };
+      const off = (await call(req('POST', { query: { code: made.code, action: 'offer' }, headers: { 'x-host-key': made.hostKey }, body: { kind: 'link' } }))).body as { token: string };
+      const [a, b] = await Promise.all([
+        call(req('POST', { query: { code: made.code, action: 'claim' }, body: { token: off.token, keyHash: hashOf(newKeyA) }, ip: '1.2.3.4' })),
+        call(req('POST', { query: { code: made.code, action: 'claim' }, body: { token: off.token, keyHash: hashOf(key2) }, ip: '1.2.3.5' }))
+      ]);
+      const wins = [a.status, b.status].filter(x => x === 200).length;
+      expect(wins).toBe(1);
+      const valid = async (k: string) => (await call(req('POST', { query: { code: made.code, action: 'verify' }, headers: { 'x-host-key': k } }))).status === 200;
+      const states = [await valid(made.hostKey), await valid(newKeyA), await valid(key2)];
+      expect(states.filter(Boolean).length).toBe(1);
+      expect(states[0]).toBe(false); // the old host is out
+      expect(states[a.status === 200 ? 1 : 2]).toBe(true);
+    }
+  });
+
+  it('a stale save from the old host racing a hand-over can never bring the old key back', async () => {
+    for (let round = 0; round < 20; round++) {
+      const { call } = mk();
+      ip++;
+      const made = (await call(req('POST', { body: { snapshot: snap() } }))).body as { code: string; hostKey: string };
+      const off = (await call(req('POST', { query: { code: made.code, action: 'offer' }, headers: { 'x-host-key': made.hostKey }, body: { kind: 'link' } }))).body as { token: string };
+      const [put, claim] = await Promise.all([
+        call(req('PUT', { query: { code: made.code }, headers: { 'x-host-key': made.hostKey }, body: { snapshot: snap({ name: `edit${round}` }) } })),
+        call(req('POST', { query: { code: made.code, action: 'claim' }, body: { token: off.token, keyHash: hashOf(newKeyA) }, ip: '2.2.2.2' }))
+      ]);
+      expect(claim.status).toBe(200);
+      const verify = async (k: string) => (await call(req('POST', { query: { code: made.code, action: 'verify' }, headers: { 'x-host-key': k } }))).status;
+      expect(await verify(newKeyA)).toBe(200);  // the new host really is host (used to fail ~15% of the time)
+      expect(await verify(made.hostKey)).toBe(403);
+      expect([200, 403]).toContain(put.status);
+    }
+  });
+
+  it('host stopping the table while a claim lands cannot leave a half-deleted table', async () => {
+    for (let round = 0; round < 10; round++) {
+      const { call } = mk();
+      ip++;
+      const made = (await call(req('POST', { body: { snapshot: snap() } }))).body as { code: string; hostKey: string };
+      const off = (await call(req('POST', { query: { code: made.code, action: 'offer' }, headers: { 'x-host-key': made.hostKey }, body: { kind: 'link' } }))).body as { token: string };
+      const [del, claim] = await Promise.all([
+        call(req('DELETE', { query: { code: made.code }, headers: { 'x-host-key': made.hostKey } })),
+        call(req('POST', { query: { code: made.code, action: 'claim' }, body: { token: off.token, keyHash: hashOf(newKeyA) }, ip: '3.3.3.3' }))
+      ]);
+      const view = await call(req('GET', { query: { code: made.code }, ip: '4.4.4.4' }));
+      if (del.status === 200) expect(view.status).toBe(404);           // stopped means stopped
+      else expect(view.status).toBe(200);                                // the claim won, the old host's stop was refused
+      expect([200, 403, 404]).toContain(claim.status);
+    }
+  });
+});
+const newKeyA = 'a'.repeat(32);

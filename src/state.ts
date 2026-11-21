@@ -1,6 +1,6 @@
 import {
-  buildNotepad, parseBackup, parseBuyInUnit, reconcile, solve, toCents,
-  type Player, type ReconcileMode, type SavedSession, type SessionData
+  MAX_BILLS, MAX_GUESTS, MAX_BILL_CENTS, buildNotepad, parseBackup, parseBuyInUnit, reconcile, solve, toCents,
+  type Bill, type Player, type ReconcileMode, type SavedSession, type SessionData
 } from './engine';
 import { PRESETS, type Preset } from './presets';
 import { loadLive, loadPrefs, loadTheme, loadVault, savePrefs, saveLive, saveTheme, saveVault, type Prefs, type Theme } from './storage';
@@ -30,7 +30,8 @@ function fromPreset(p: Preset): SessionData {
     isEnded: false,
     isDemo: true,
     players: p.players.map(x => ({ ...x, id: uid('p') })),
-    paid: {}
+    paid: {},
+    bills: []
   };
 }
 
@@ -61,14 +62,21 @@ export const onCommit = (fn: Listener) => commitHooks.push(fn);
 const stamp = (d = new Date()) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 
+let persistLocked = false;
+/**
+ * Another tab on this phone became the host of the table this tab was running. Both tabs share one saved copy, so
+ * from now on this tab must not write it (that would erase the new host's key).
+ */
+export function lockPersistence() { persistLocked = true; }
+
 export function commit() {
-  state.storageOk = saveLive(state.session);
+  if (!persistLocked) state.storageOk = saveLive(state.session);
   state.lastSave = stamp().slice(11);
   commitHooks.forEach(fn => fn());
   listeners.forEach(fn => fn());
 }
 
-export const audit = () => solve(state.session.players, state.session.expenseCents, state.session.defaultBuyIn);
+export const audit = () => solve(state.session.players, state.session.expenseCents, state.session.defaultBuyIn, state.session.bills ?? []);
 export { paidKey } from './engine';
 
 type Share = NonNullable<SessionData['share']>;
@@ -88,12 +96,12 @@ function replaceSession(next: SessionData) {
  * Becoming the host of a table someone else was running. The table that was open on this phone is kept in
  * History first, so nothing is lost.
  */
-export function adoptSharedSession(s: { name: string; defaultBuyIn: number; expenseCents: number; isEnded: boolean; players: Player[]; paid: Record<string, boolean> }, share: NonNullable<SessionData['share']>) {
+export function adoptSharedSession(s: { name: string; defaultBuyIn: number; expenseCents: number; isEnded: boolean; players: Player[]; paid: Record<string, boolean>; bills?: Bill[] }, share: NonNullable<SessionData['share']>) {
   const cur = state.session;
   if (!cur.isDemo && cur.players.length > 0 && cur.share?.code !== share.code) saveToHistory('Saved before taking over a table');
   replaceSession({
     id: uid('sess'), name: s.name, defaultBuyIn: s.defaultBuyIn, expenseCents: s.expenseCents, isEnded: s.isEnded,
-    isDemo: false, share, players: s.players.map(p => ({ ...p })), paid: { ...s.paid }
+    isDemo: false, share, players: s.players.map(p => ({ ...p })), paid: { ...s.paid }, bills: (s.bills ?? []).map(b => ({ ...b }))
   });
   state.tab = 'table';
   commit();
@@ -109,7 +117,7 @@ export function shareSnapshot() {
   const s = state.session;
   return {
     name: s.name, defaultBuyIn: s.defaultBuyIn, expenseCents: s.expenseCents,
-    isEnded: s.isEnded, players: s.players, paid: s.paid
+    isEnded: s.isEnded, players: s.players, paid: s.paid, bills: s.bills ?? []
   };
 }
 
@@ -140,7 +148,50 @@ export function addPlayer(name: string, buyIns: number) {
   });
   commit();
 }
-export function removePlayer(id: string) { state.session.players = state.session.players.filter(p => p.id !== id); commit(); }
+export function removePlayer(id: string) {
+  const gone = state.session.players.find(p => p.id === id);
+  // an expense this player paid stays: it is now paid by someone who is not in the list
+  if (gone) for (const b of state.session.bills ?? []) if (b.payerId === id) { delete b.payerId; b.guest = gone.name; }
+  state.session.players = state.session.players.filter(p => p.id !== id);
+  commit();
+}
+
+export type BillInput = { label: string; cents: number; payerId?: string; guest?: string };
+/** Returns an error message, or null when the expense was saved. */
+export function checkBill(input: BillInput, ignoreId?: string): string | null {
+  const s = state.session;
+  if (!(input.cents > 0)) return 'Enter an amount greater than $0.';
+  if (input.cents > MAX_BILL_CENTS) return 'That amount is too large.';
+  if (!input.payerId && !input.guest?.trim()) return input.guest === undefined ? 'Pick who paid.' : 'Type the name of the person who paid.';
+  const bills = (s.bills ?? []).filter(b => b.id !== ignoreId);
+  if (bills.length >= MAX_BILLS) return `You can add up to ${MAX_BILLS} expenses.`;
+  if (input.guest?.trim()) {
+    const g = input.guest.trim().toLowerCase();
+    const clash = s.players.find(p => p.name.trim().toLowerCase() === g);
+    if (clash) return `${clash.name} is already a player — pick them above.`;
+    const names = new Set(bills.filter(b => b.guest).map(b => b.guest!.trim().toLowerCase()));
+    if (!names.has(g) && names.size >= MAX_GUESTS) return `You can add up to ${MAX_GUESTS} people who are not playing.`;
+  }
+  return null;
+}
+/** Adds or replaces an expense. Changing expenses changes who pays whom, so the "paid" ticks start over. */
+export function saveBill(input: BillInput, id?: string): string | null {
+  const err = checkBill(input, id);
+  if (err) return err;
+  const s = state.session;
+  const bill: Bill = { id: id ?? uid('b'), label: input.label.trim().slice(0, 40) || 'Expense', cents: Math.round(input.cents) };
+  if (input.payerId) bill.payerId = input.payerId; else bill.guest = input.guest!.trim().slice(0, 40);
+  const list = s.bills ?? [];
+  s.bills = id && list.some(b => b.id === id) ? list.map(b => (b.id === id ? bill : b)) : [...list, bill];
+  s.paid = {};
+  commit();
+  return null;
+}
+export function removeBill(id: string) {
+  state.session.bills = (state.session.bills ?? []).filter(b => b.id !== id);
+  state.session.paid = {};
+  commit();
+}
 export function updatePlayer(id: string, patch: Partial<Player>) {
   const p = state.session.players.find(x => x.id === id);
   if (p) Object.assign(p, patch);
@@ -175,7 +226,8 @@ function snapshot(status: string): SavedSession {
     id: s.id, name: s.name, timestamp: stamp(), status,
     defaultBuyIn: s.defaultBuyIn, expenseCents: s.expenseCents,
     players: s.players.map(p => ({ ...p })),
-    paid: { ...s.paid }
+    paid: { ...s.paid },
+    bills: (s.bills ?? []).map(b => ({ ...b }))
   };
 }
 
@@ -211,7 +263,7 @@ export function reopenSession() { state.session.isEnded = false; commit(); }
 
 export function newSession(p?: Preset) {
   replaceSession(p ? fromPreset(p) : {
-    id: uid('sess'), name: 'New Poker Session', defaultBuyIn: 100, expenseCents: 0, isEnded: false, isDemo: false, players: [], paid: {}
+    id: uid('sess'), name: 'New Poker Session', defaultBuyIn: 100, expenseCents: 0, isEnded: false, isDemo: false, players: [], paid: {}, bills: []
   });
   state.tab = 'table';
   commit();
@@ -222,7 +274,7 @@ export function loadSaved(id: string) {
   if (!s) return;
   replaceSession({
     id: s.id, name: s.name, defaultBuyIn: s.defaultBuyIn, expenseCents: s.expenseCents,
-    isEnded: s.status.startsWith('Completed'), isDemo: false, players: s.players.map(p => ({ ...p })), paid: { ...(s.paid ?? {}) }
+    isEnded: s.status.startsWith('Completed'), isDemo: false, players: s.players.map(p => ({ ...p })), paid: { ...(s.paid ?? {}) }, bills: (s.bills ?? []).map(b => ({ ...b }))
   });
   state.tab = 'table';
   commit();
@@ -258,7 +310,7 @@ export function importBackup(text: string): string | null {
   const s = parsed.session;
   replaceSession({
     id: s.id, name: s.name, defaultBuyIn: s.defaultBuyIn, expenseCents: s.expenseCents,
-    isEnded: false, isDemo: false, players: s.players, paid: {}
+    isEnded: false, isDemo: false, players: s.players, paid: {}, bills: s.bills ?? []
   });
   state.tab = 'table';
   commit();

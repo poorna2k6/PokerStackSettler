@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildNotepad, buildReceipt, buyInCount, paidKey, uniqueSessionIds, formatUnit, leaderboard, parseBuyInUnit, sanitizeBuyIn, parseBackup, reconcile, sanitizePlayers, settleNodes, solve,
-  formatCurrency, toCents, type Player
+  formatCurrency, toCents, splitEvenly, sanitizeBills, MAX_BILL_CENTS, type Player
 } from './engine';
 
 const P = (id: string, bi: number, co: number): Player => ({ id, name: id, buyInCents: bi, cashOutCents: co });
@@ -282,5 +282,87 @@ describe('saved session paid marks', () => {
     const raw = { id: 's', name: 'G', players: [{ id: 'a', name: 'a', buyInCents: 1, cashOutCents: 1 }], paid: { 'a->b:100': true, 'x': false, 'y': 'yes' } };
     const parsed = parseBackup(JSON.stringify([raw]));
     expect(parsed?.kind === 'vault' && parsed.sessions[0].paid).toEqual({ 'a->b:100': true });
+  });
+});
+
+describe('extra expenses (food, drinks)', () => {
+  const pl = (id: string, bi: number, co: number) => ({ id, name: id.toUpperCase(), buyInCents: bi, cashOutCents: co });
+  const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+
+  it('splits exactly, extra cents to the first players', () => {
+    expect(splitEvenly(1000, 3)).toEqual([334, 333, 333]);
+    expect(splitEvenly(5, 0)).toEqual([]);
+    expect(sum(splitEvenly(12345, 7))).toBe(12345);
+  });
+
+  it('settles food paid by a player and by an outsider, and nets to zero', () => {
+    const players = [pl('a', 10000, 12000), pl('b', 10000, 8000)];
+    const bills = [
+      { id: '1', label: 'Pizza', cents: 3000, payerId: 'a' },
+      { id: '2', label: 'Beer', cents: 1000, guest: 'Sam' }
+    ];
+    const a = solve(players, 0, 100, bills);
+    expect(a.isBalanced).toBe(true); // expenses never touch the chip check
+    expect(a.billsTotalCents).toBe(4000);
+    expect(a.players.map(p => p.shareCents)).toEqual([2000, 2000]);
+    expect(a.players[0].finalCents).toBe(2000 + 3000 - 2000);
+    expect(a.players[1].finalCents).toBe(-2000 - 2000);
+    expect(a.guests).toHaveLength(1);
+    expect(a.guests[0].finalCents).toBe(1000);
+    const moved = new Map<string, number>();
+    for (const t of a.transfers) {
+      moved.set(t.fromId, (moved.get(t.fromId) ?? 0) - t.amountCents);
+      moved.set(t.toId, (moved.get(t.toId) ?? 0) + t.amountCents);
+    }
+    expect(moved.get('a') ?? 0).toBe(a.players[0].finalCents);
+    expect(moved.get('b') ?? 0).toBe(a.players[1].finalCents);
+    expect(moved.get('guest:sam') ?? 0).toBe(1000);
+  });
+
+  it('a guest typed with a player\'s name is that player', () => {
+    const a = solve([pl('a', 100, 100), pl('b', 100, 100)], 0, 1, [{ id: 'x', label: 'Snacks', cents: 600, guest: ' a ' }]);
+    expect(a.guests).toHaveLength(0);
+    expect(a.players[0].paidCents).toBe(600);
+  });
+
+  it('is exact for random games (zero-sum, whole cents)', () => {
+    let seed = 42;
+    const rnd = (n: number) => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; };
+    for (let t = 0; t < 400; t++) {
+      const n = 2 + rnd(9);
+      const players = Array.from({ length: n }, (_, i) => pl(`p${i}`, 1000 + rnd(50000), 0));
+      const pot = sum(players.map(p => p.buyInCents));
+      let left = pot;
+      players.forEach((p, i) => { p.cashOutCents = i === n - 1 ? left : rnd(left + 1); left -= p.cashOutCents; });
+      const bills = Array.from({ length: rnd(5) }, (_, i) => ({ id: `b${i}`, label: 'x', cents: 1 + rnd(20000), ...(rnd(2) ? { payerId: `p${rnd(n)}` } : { guest: `G${rnd(3)}` }) }));
+      const a = solve(players, 0, 100, bills);
+      const finals = sum(a.players.map(p => p.finalCents)) + sum(a.guests.map(g => g.finalCents));
+      expect(finals).toBe(0);
+      const net = new Map<string, number>();
+      for (const tr of a.transfers) {
+        net.set(tr.fromId, (net.get(tr.fromId) ?? 0) - tr.amountCents);
+        net.set(tr.toId, (net.get(tr.toId) ?? 0) + tr.amountCents);
+      }
+      for (const p of a.players) expect(net.get(p.id) ?? 0).toBe(p.finalCents);
+      for (const g of a.guests) expect(net.get(g.id) ?? 0).toBe(g.finalCents);
+    }
+  });
+
+  it('cleans hostile input and survives a notepad round trip', () => {
+    const raw = [
+      { id: 'a', label: 'x'.repeat(200), cents: 1e12, guest: 'G' },
+      { cents: -5, guest: 'z' }, { cents: 'abc' }, null, 7,
+      ...Array.from({ length: 50 }, (_, i) => ({ id: `n${i}`, label: 'l', cents: 100, guest: `g${i}` }))
+    ];
+    const clean = sanitizeBills(raw);
+    expect(clean.length).toBeLessThanOrEqual(30);
+    expect(new Set(clean.map(b => b.guest?.toLowerCase())).size).toBeLessThanOrEqual(8);
+    expect(clean[0].label.length).toBe(40);
+    expect(clean[0].cents).toBe(MAX_BILL_CENTS);
+    const session = { id: 's', name: 'G', defaultBuyIn: 100, expenseCents: 0, isEnded: false, paid: {}, players: [pl('a', 10000, 10000), pl('b', 10000, 10000)], bills: [{ id: '1', label: 'Pizza', cents: 3000, payerId: 'a' }] };
+    const text = buildNotepad(session);
+    expect(text).toContain('EXTRA EXPENSES');
+    const back = parseBackup(text);
+    expect(back?.kind === 'session' && back.session.bills?.[0].cents).toBe(3000);
   });
 });

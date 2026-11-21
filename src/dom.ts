@@ -62,7 +62,8 @@ export function openSheet(title: string, build: (close: () => void) => Node): Sh
   const backdrop = h('div', { class: 'backdrop' });
   const sheet = h('div', { class: 'sheet', attrs: { role: 'dialog', 'aria-modal': 'true', 'aria-label': title } });
   const onKey = (e: KeyboardEvent) => {
-    if (e.key === 'Escape') { close(); return; }
+    // Escape closes only the TOP sheet (a confirm opened from another sheet must not take that one down with it).
+    if (e.key === 'Escape') { if (root.lastElementChild === sheet) close(); return; }
     // Keep Tab focus inside the topmost sheet.
     if (e.key !== 'Tab' || root.lastElementChild !== sheet) return;
     const items = [...sheet.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])')];
@@ -73,15 +74,26 @@ export function openSheet(title: string, build: (close: () => void) => Node): Sh
     if (e.shiftKey && (active === first || !sheet.contains(active))) { e.preventDefault(); last.focus(); }
     else if (!e.shiftKey && (active === last || !sheet.contains(active))) { e.preventDefault(); first.focus(); }
   };
+  const previousKey = previous?.dataset?.fk;
   const close = () => {
     document.removeEventListener('keydown', onKey);
+    sheet.style.pointerEvents = 'none'; // a closing sheet must not accept another tap during its fade-out
     sheet.classList.remove('in');
     backdrop.classList.remove('in');
     setTimeout(() => {
       sheet.remove();
       backdrop.remove();
-      // Hand focus back only when no other sheet took over (e.g. confirm -> rename sheet).
-      if (root.querySelector('.sheet')) return;
+      // Another sheet is still open (we were stacked on it): put focus back inside it, on the same control if it
+      // still exists (it may have been redrawn), otherwise on its first control.
+      const top = [...root.querySelectorAll<HTMLElement>('.sheet')].pop();
+      if (top) {
+        if (!top.contains(document.activeElement)) {
+          const same = previousKey ? top.querySelector<HTMLElement>(`[data-fk="${previousKey}"]`) : null;
+          const target = (previous && top.contains(previous) ? previous : same) ?? top.querySelector<HTMLElement>('button, input');
+          target?.focus({ preventScroll: true });
+        }
+        return;
+      }
       if (previous?.isConnected) previous.focus();
       else focusFallback?.();
     }, 220);
@@ -101,6 +113,16 @@ export function openSheet(title: string, build: (close: () => void) => Node): Sh
   return { close };
 }
 
+/** Closes every open sheet at once (used when the situation under them changed, e.g. the host role moved). */
+export function closeAllSheets() {
+  const root = document.getElementById('sheets');
+  if (!root) return;
+  for (const el of [...root.children]) {
+    el.classList.remove('in');
+    setTimeout(() => el.remove(), 220);
+  }
+}
+
 export interface ConfirmOpts {
   title: string;
   message: string;
@@ -111,13 +133,14 @@ export interface ConfirmOpts {
 }
 
 export function confirmSheet(o: ConfirmOpts) {
+  let confirmed = false;
   openSheet(o.title, close =>
     h('div', { class: 'sheet-body' },
       h('p', { class: 'muted pre', text: o.message }),
       h('button', {
         class: `btn ${o.destructive ? 'danger' : 'primary'} block`,
         text: o.confirmLabel,
-        on: { click: () => { close(); o.onConfirm(); } }
+        on: { click: () => { if (confirmed) return; confirmed = true; close(); o.onConfirm(); } } // a double-tap must act once
       }),
       h('button', { class: 'btn plain block', text: o.cancelLabel ?? 'Cancel', on: { click: close } }))
   );

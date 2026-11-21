@@ -1,11 +1,12 @@
 import { h, haptic, openSheet, confirmSheet, setFocusFallback, toast } from './dom';
 import { clink, setSoundEnabled } from './sound';
 import { MAX_SEATS, avatar, chipStack, group, header, kpi, ovalTable } from './ui';
-import { formatCode, normalizeCode } from './shared';
+import { SHARE_TTL_CHOICES, SHARE_TTL_SECONDS, formatCode, normalizeCode } from './shared';
 import { openHandsSheet } from './hands';
+import { askExtraExpenses, openExpenses, previewLines } from './expenses';
 import { openHandoverSheet } from './handover';
 import { drawSettlement, sharePicture } from './picture';
-import { shareUrl, startSharing, stopSharing, sync } from './sync';
+import { setShareTtl, shareUrl, startSharing, stopSharing, sync } from './sync';
 import {
   buildReceipt, formatBuyInCount, formatUnit, parseBackup, MAX_UNIT, MIN_UNIT, type Audit, formatCurrency, leaderboard, toCents, unitCentsFor,
   type SavedSession
@@ -76,6 +77,7 @@ function startFresh() {
   openAddPlayer();
 }
 
+const ttlLabel = (sec?: number) => (SHARE_TTL_CHOICES.find(c => c.seconds === (sec ?? SHARE_TTL_SECONDS))?.label ?? '7 days').replace(/ \(.*$/, '').replace('Until I stop it', '90 days');
 const LINK_NOTE = '\n\nThis also stops your live view-only link.';
 
 function requestNew() {
@@ -121,7 +123,8 @@ function tableView(): HTMLElement {
     view.append(group(h('div', { class: 'row banner info' },
       h('span', { text: '🔒 Session settled and locked' }),
       h('button', { class: 'link', text: 'Reopen', on: { click: () => confirmSheet({
-        title: 'Reopen session?', message: 'Editing will be enabled again. You can settle it again afterwards.',
+        title: 'Reopen session?',
+        message: `Editing will be enabled again. You can settle it again afterwards.${Object.keys(state.session.paid).length ? '\n\nChanging chips or expenses changes who pays whom, so the “paid” ticks will start again.' : ''}`,
         confirmLabel: 'Reopen', onConfirm: reopenSession }) } }))));
   } else if (!a.isBalanced && a.players.length > 0) {
     const over = a.discrepancyCents > 0;
@@ -131,9 +134,9 @@ function tableView(): HTMLElement {
           h('strong', { text: `${formatCurrency(Math.abs(a.discrepancyCents))} ${over ? 'too many' : 'missing'}` }),
           h('span', { class: 'muted', text: 'Ending chips ≠ buy-ins' })),
         h('div', { class: 'seg-row' },
-          h('button', { class: 'chip', text: 'Pro-rata', on: { click: () => applyReconcile('proRataWinners') } }),
-          h('button', { class: 'chip', text: 'Equal split', on: { click: () => applyReconcile('equalSplit') } }),
-          h('button', { class: 'chip', text: 'Top winner', on: { click: () => applyReconcile('topWinner') } })))
+          h('button', { class: 'chip', text: 'Pro-rata', on: { click: () => requestReconcile('proRataWinners', 'Pro-rata') } }),
+          h('button', { class: 'chip', text: 'Equal split', on: { click: () => requestReconcile('equalSplit', 'Equal split') } }),
+          h('button', { class: 'chip', text: 'Top winner', on: { click: () => requestReconcile('topWinner', 'Top winner') } })))
     );
   }
 
@@ -164,8 +167,12 @@ function tableView(): HTMLElement {
   view.append(group(
     field('Name', textInput(s.name, setName, { disabled: locked, label: 'Session name' })),
     field('Buy-in unit ($)', textInput(String(s.defaultBuyIn), changeUnit, { disabled: locked, mode: 'decimal', label: 'Buy-in unit' })),
-    field('Rake ($)', textInput(money(s.expenseCents), setExpense, { disabled: locked, mode: 'decimal', label: 'Expense pot' }))
+    field('Rake / house cut ($)', textInput(money(s.expenseCents), setExpense, { disabled: locked, mode: 'decimal', label: 'Rake or house cut' })),
+    h('button', { class: 'row action', attrs: { 'aria-label': `Extra expenses, ${a.billsTotalCents ? formatCurrency(a.billsTotalCents) : 'none'}` }, on: { click: () => openExpenses() } },
+      h('span', { class: 'grow', text: 'Extra expenses (food, drinks…)' }),
+      h('span', { class: 'muted mono', text: a.billsTotalCents ? formatCurrency(a.billsTotalCents) : 'None' }), h('span', { class: 'muted', text: '›' }))
   ));
+  view.append(h('div', { class: 'foot', text: 'Rake is chips the house keeps. Food and drinks go under Extra expenses so nobody enters them twice.' }));
 
   view.append(
     h('button', {
@@ -195,6 +202,7 @@ function shareStatus(): string {
     case 'ok': return `● Live view on · synced ${sync.at}`;
     case 'syncing': return '● Live view on · syncing…';
     case 'offline': return '○ Live view paused (offline) — will catch up when you’re back online';
+    case 'unavailable': return '⚠️ Live view paused — the server’s sharing storage isn’t set up (see README)';
     default: return '● Live view on';
   }
 }
@@ -211,16 +219,19 @@ function openShareSheet() {
     let draw = () => {
       const share = state.session.share;
       if (!share) {
+        const pick = h('select', { attrs: { 'aria-label': 'How long the link stays valid' } },
+          ...SHARE_TTL_CHOICES.map(c => h('option', { text: c.label, attrs: { value: c.seconds, selected: c.seconds === SHARE_TTL_SECONDS } })));
         const start = h('button', { class: 'btn primary block', text: 'Start sharing', on: { click: async () => {
           start.disabled = true;
           start.textContent = 'Starting…';
-          const msg = await startSharing();
+          const msg = await startSharing(Number(pick.value));
           if (msg) toast(msg, 'error');
           draw();
         } } });
         body.replaceChildren(
           h('p', { class: 'muted', text: 'Let everyone at the table watch live: each player’s buy-ins, chips and who pays whom. They get a link to a view-only page — only you can make changes.' }),
-          h('p', { class: 'muted small', text: 'Names and amounts are stored on a server and deleted 7 days after your last change. You can stop sharing at any time.' }),
+          group(h('label', { class: 'row field' }, h('span', { text: 'Link stays valid for' }), pick)),
+          h('p', { class: 'muted small', text: 'Names and amounts are stored on a server and deleted after that time counted from your last change (every edit starts it again). You can stop sharing at any time.' }),
           ...(state.session.isDemo ? [h('p', { class: 'bad small', text: 'This is demo data — start a fresh session to share a real game.' })] : []),
           state.session.isDemo ? Object.assign(start, { disabled: true }) : start,
           h('button', { class: 'btn plain block', text: 'Not now', on: { click: close } }));
@@ -242,7 +253,10 @@ function openShareSheet() {
           h('button', { class: 'btn tinted', text: 'Copy link', on: { click: () => copyText(url) } }),
           h('button', { class: 'btn tinted', text: 'Copy code', on: { click: () => copyText(formatCode(share.code)) } })),
         statusEl,
-        h('p', { class: 'muted small', text: 'Viewers can’t edit anything. The link stays valid for 7 days after your last change, or until you stop sharing.' }),
+        h('p', { class: 'muted small', text: `Viewers can’t edit anything. ${sync.expiresAt ? `The link is valid until ${new Date(sync.expiresAt).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })}; ` : ''}every change you make starts the ${ttlLabel(sync.ttl)} again, or until you stop sharing.` }),
+        group(h('label', { class: 'row field' }, h('span', { text: 'Valid for' }),
+          h('select', { attrs: { 'aria-label': 'How long the link stays valid' }, on: { change: e => { setShareTtl(Number((e.target as HTMLSelectElement).value)); toast('Link lifetime updated'); } } },
+            ...SHARE_TTL_CHOICES.map(c => h('option', { text: c.label, attrs: { value: c.seconds, selected: c.seconds === (sync.ttl ?? SHARE_TTL_SECONDS) } }))))),
         h('button', { class: 'btn tinted block', text: '🎩 Hand over the table', on: { click: () => { close(); openHandoverSheet(); } } }),
         h('button', { class: 'btn danger block', text: 'Stop sharing', on: { click: () => { close(); confirmSheet({
           title: 'Stop sharing?', message: 'The link and code stop working immediately for everyone watching.',
@@ -284,9 +298,53 @@ function storageNote() {
     : '⚠️ Storage is blocked — changes will be lost when you close this page. Use Export to keep a copy.';
 }
 
+/** True while one of these confirmations is the top dialog (other sheets, like the seat sheet, don't count). */
+function confirmOpen(): boolean {
+  const top = [...document.querySelectorAll('#sheets .sheet')].pop();
+  return !!top && /^(Add a buy-in for|Apply “)/.test(top.getAttribute('aria-label') ?? '');
+}
+
+/**
+ * Adding a buy-in changes the pot and every viewer's screen within a second, and the only undo is "−", so a stray
+ * tap is expensive. Ask first (switch off in Settings for a busy table). The text is built when the sheet opens,
+ * from the CURRENT numbers, not from whatever the row showed when it was drawn.
+ */
+function requestRebuy(id: string, after?: () => void) {
+  const p = state.session.players.find(x => x.id === id);
+  if (!p || state.session.isEnded) return;
+  const doIt = () => { haptic(); clink(); rebuy(id, 1); after?.(); };
+  if (!state.prefs.confirmBuyIn) { doIt(); return; }
+  if (confirmOpen()) return; // a confirmation is already showing: ignore stray taps behind it
+  const unit = toCents(state.session.defaultBuyIn);
+  const before = audit().players.find(x => x.id === id);
+  const nowCents = before?.buyInCents ?? p.buyInCents;
+  const fromCount = before?.buyInCount ?? 0;
+  const toCount = Math.round(((nowCents + unit) / unitCentsFor(state.session.defaultBuyIn)) * 10) / 10;
+  confirmSheet({
+    title: `Add a buy-in for ${p.name}?`,
+    message: `${p.name} goes from ${formatBuyInCount(fromCount)} · ${formatCurrency(nowCents)} to ${formatBuyInCount(toCount)} · ${formatCurrency(nowCents + unit)} (+${formatCurrency(unit)}).`,
+    confirmLabel: `Add ${formatCurrency(unit)}`,
+    onConfirm: doIt
+  });
+}
+
+/** The chip fixes overwrite everybody's typed ending chips and cannot be undone, so they ask first as well. */
+function requestReconcile(mode: 'proRataWinners' | 'equalSplit' | 'topWinner', label: string) {
+  if (!state.prefs.confirmBuyIn) { applyReconcile(mode); return; }
+  if (confirmOpen()) return;
+  const a = audit();
+  if (a.isBalanced) return;
+  confirmSheet({
+    title: `Apply “${label}”?`,
+    message: `Ending chips are ${formatCurrency(Math.abs(a.discrepancyCents))} ${a.discrepancyCents < 0 ? 'short' : 'over'}. “${label}” changes the ending chips so the table balances.\n\nThis can’t be undone automatically.`,
+    confirmLabel: 'Apply', destructive: true,
+    onConfirm: () => applyReconcile(mode)
+  });
+}
+
 function stepper(id: string, buyIn: number, count: number, locked: boolean, after?: () => void) {
   const unit = unitCentsFor(state.session.defaultBuyIn);
-  const bump = (d: number) => () => { haptic(); clink(); rebuy(id, d); after?.(); };
+  const bump = (d: number) => () => { if (d > 0) { requestRebuy(id, after); return; } haptic(); clink(); rebuy(id, d); after?.(); };
   const who = state.session.players.find(p => p.id === id)?.name ?? 'player';
   return h('div', { class: 'stepper' },
     h('button', { text: '−', attrs: { 'aria-label': `Remove one buy-in for ${who}`, 'data-fk': `minus:${id}`, disabled: locked || buyIn < unit }, on: { click: bump(-1) } }),
@@ -413,19 +471,26 @@ function finishSession() {
 }
 
 function requestEnd() {
+  const a0 = audit();
+  if (a0.players.length < 2) { toast('Add at least 2 players to settle', 'error'); return; }
+  if (a0.billsTotalCents === 0 && !state.session.isEnded) { askExtraExpenses(confirmEnd); return; }
+  confirmEnd();
+}
+
+function confirmEnd() {
   const a = audit();
-  if (a.players.length < 2) { toast('Add at least 2 players to settle', 'error'); return; }
+  if (a.players.length < 2) return;
   if (!a.isBalanced) {
     confirmSheet({
       title: `Chips are ${formatCurrency(Math.abs(a.discrepancyCents))} ${a.discrepancyCents < 0 ? 'short' : 'over'}`,
-      message: `${a.totalPlayerCashOutCents === 0 ? 'No ending chips have been entered yet.\n\n' : ''}Ending chips (${formatCurrency(a.totalAccountedCents)}) don't match buy-ins (${formatCurrency(a.totalBuyInCents)}).\n\nContinuing will adjust payouts so the table balances (pro-rata among winners, or equally if nobody is ahead), then lock the session.`,
+      message: `${previewLines()}${a.totalPlayerCashOutCents === 0 ? 'No ending chips have been entered yet.\n\n' : ''}Ending chips (${formatCurrency(a.totalAccountedCents)}) don't match buy-ins (${formatCurrency(a.totalBuyInCents)}).\n\nContinuing will adjust payouts so the table balances (pro-rata among winners, or equally if nobody is ahead), then lock the session.`,
       confirmLabel: 'Balance & settle', onConfirm: finishSession
     });
     return;
   }
   confirmSheet({
     title: 'End & settle?',
-    message: `${a.players.length} players · ${formatCurrency(a.totalBuyInCents)} pot · ${a.transfers.length} transfer${a.transfers.length === 1 ? '' : 's'}.\n\n${state.session.isDemo ? 'This is demo data, so it won’t be saved to History. The session will be locked.' : 'The session will be saved to History and locked.'}`,
+    message: `${previewLines()}${a.players.length} players · ${formatCurrency(a.totalBuyInCents)} pot · ${a.transfers.length} transfer${a.transfers.length === 1 ? '' : 's'}.\n\n${state.session.isDemo ? 'This is demo data, so it won’t be saved to History. The session will be locked.' : 'The session will be saved to History and locked.'}`,
     confirmLabel: 'End session', onConfirm: finishSession
   });
 }
@@ -472,13 +537,24 @@ function settleView(): HTMLElement {
     })));
   }
 
-  view.append(header('Standings'));
+  view.append(header('Standings', a.billsTotalCents ? 'poker → after food' : ''));
   const sorted = [...a.players].sort((x, y) => y.netCents - x.netCents);
+  const hasBills = a.billsTotalCents > 0;
   view.append(group(...sorted.map((p, i) => h('div', { class: `row standing ${i === 0 && p.netCents > 0 ? 'gold' : ''}` },
     h('span', { class: 'rank', text: i === 0 && p.netCents > 0 ? '🏆' : String(i + 1) }),
     h('span', { class: 'grow', text: p.name }),
     h('span', { class: 'muted mono', text: formatBuyInCount(p.buyInCount) }),
-    h('span', { class: `mono ${p.netCents > 0 ? 'good' : p.netCents < 0 ? 'bad' : 'muted'}`, text: formatCurrency(p.netCents, true) })))));
+    h('span', { class: `mono ${p.netCents > 0 ? 'good' : p.netCents < 0 ? 'bad' : 'muted'}`, text: formatCurrency(p.netCents, true) }),
+    ...(hasBills ? [h('span', { class: `mono ${p.finalCents > 0 ? 'good' : p.finalCents < 0 ? 'bad' : 'muted'}`, text: `→ ${formatCurrency(p.finalCents, true)}` })] : [])))));
+  if (a.guests.length) {
+    view.append(header('Not playing'));
+    view.append(group(...a.guests.map(g => h('div', { class: 'row standing' },
+      h('span', { class: 'rank', text: '🍕' }), h('span', { class: 'grow', text: g.name }),
+      h('span', { class: `mono ${g.finalCents > 0 ? 'good' : 'muted'}`, text: formatCurrency(g.finalCents, true) })))));
+  }
+  view.append(group(h('button', { class: 'row action', on: { click: () => openExpenses() } },
+    h('span', { class: 'grow', text: 'Extra expenses (food, drinks…)' }),
+    h('span', { class: 'muted mono', text: hasBills ? formatCurrency(a.billsTotalCents) : s.isEnded ? 'None' : 'Add' }), h('span', { class: 'muted', text: '›' }))));
 
   const receipt = () => buildReceipt(s.name, a, s.paid);
   if (a.players.length === 0) return view;
@@ -551,7 +627,12 @@ function settingsView(): HTMLElement {
   }, h('span', { class: 'dot', attrs: { style: `background:${swatch[t]}` } }), h('span', { text: t[0].toUpperCase() + t.slice(1) })))));
 
   view.append(header('Sound & feel'));
-  view.append(group(h('button', {
+  view.append(group(
+    h('button', {
+      class: 'row action', attrs: { role: 'switch', 'aria-checked': state.prefs.confirmBuyIn },
+      on: { click: () => setPrefs({ confirmBuyIn: !state.prefs.confirmBuyIn }) }
+    }, h('span', { class: 'grow' }, 'Confirm extra buy-ins', h('div', { class: 'muted small', text: 'Ask before adding a buy-in or applying a chip fix' })), h('span', { class: `switch ${state.prefs.confirmBuyIn ? 'on' : ''}` }, h('i'))),
+    h('button', {
     class: 'row action', attrs: { role: 'switch', 'aria-checked': state.prefs.sound },
     on: { click: () => { const on = !state.prefs.sound; setSoundEnabled(on); setPrefs({ sound: on }); clink(); } }
   }, h('span', { class: 'grow', text: 'Chip sounds' }), h('span', { class: `switch ${state.prefs.sound ? 'on' : ''}` }, h('i')))));
