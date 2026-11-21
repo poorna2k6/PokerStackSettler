@@ -15,7 +15,14 @@ export interface ApiRequest {
 }
 export interface ApiResponse { status: number; body: unknown; headers?: Record<string, string> }
 
+/** Thrown by a store that has no real backend (production without Redis): never silently use memory. */
+export class StorageNotConfigured extends Error {
+  constructor() { super('Sharing storage is not configured'); this.name = 'StorageNotConfigured'; }
+}
+
 export interface Store {
+  /** which backend this is, for the health check */
+  readonly kind?: 'redis' | 'memory' | 'unconfigured';
   get(key: string): Promise<string | null>;
   set(key: string, value: string, ttlSeconds: number): Promise<void>;
   del(key: string): Promise<void>;
@@ -39,6 +46,8 @@ interface Record_ {
   createdAt: number;
   /** increments every time the host key changes hands */
   epoch?: number;
+  /** when the store will drop this record (ms since epoch); refreshed by every write */
+  expiresAt?: number;
   offer?: Offer;
 }
 
@@ -89,6 +98,21 @@ function publicOffer(rec: Record_, now: number): PublicOffer | undefined {
   return { kind: o.kind, playerId: o.playerId, expiresAt: o.expiresAt, status: o.claim ? 'claimed' : 'open' };
 }
 
+/** Every write goes through here so the stored lifetime and the reported expiry can never disagree. */
+async function persist(store: Store, code: string, rec: Record_, now: number): Promise<void> {
+  rec.expiresAt = now + SHARE_TTL_SECONDS * 1000;
+  await store.set(`share:${code}`, JSON.stringify(rec), SHARE_TTL_SECONDS);
+}
+
+/** A missing record is either one the host stopped on purpose (tombstone) or expired/unknown. */
+async function gone(store: Store, code: string): Promise<ApiResponse> {
+  const stopped = (await store.get(`tomb:${code}`)) !== null;
+  return json(404, {
+    error: stopped ? 'The host stopped sharing this table' : 'Not found or expired',
+    reason: stopped ? 'stopped' : 'expired_or_unknown'
+  });
+}
+
 async function limited(store: Store, key: string, rule: { max: number; window: number }): Promise<boolean> {
   return (await store.incr(key, rule.window)) > rule.max;
 }
@@ -108,8 +132,13 @@ export async function handleShare(req: ApiRequest, store: Store, now = Date.now(
       for (let i = 0; i < 5 && (await store.get(`share:${code}`)); i++) code = newCode();
       const hostKey = randomBytes(24).toString('base64url');
       const rec: Record_ = { keyHash: sha256(hostKey), snapshot, rev: 1, createdAt: now, epoch: 1 };
-      await store.set(`share:${code}`, JSON.stringify(rec), SHARE_TTL_SECONDS);
+      await persist(store, code, rec, now);
       return json(201, { code, hostKey, rev: 1, epoch: 1, expiresAt: now + SHARE_TTL_SECONDS * 1000 });
+    }
+
+    if (method === 'GET' && req.query.action === 'health' && !req.query.code) {
+      await store.get('health:ping'); // throws StorageNotConfigured when there is no backend
+      return json(200, { ok: true, store: store.kind ?? 'unknown' });
     }
 
     const code = normalizeCode(req.query.code);
@@ -121,33 +150,42 @@ export async function handleShare(req: ApiRequest, store: Store, now = Date.now(
       if (await limited(store, `rl:read:${ip}`, limits.read)) return err(429, 'Too many requests');
       const rec = await load(store, code);
       if (!rec) {
-        if (await limited(store, `rl:miss:${ip}`, limits.miss)) return err(429, 'Too many requests');
-        return err(404, 'Not found or expired');
+        const g = await gone(store, code);
+        // only genuinely unknown codes count towards the guessing limit
+        if ((g.body as { reason: string }).reason !== 'stopped' && await limited(store, `rl:miss:${ip}`, limits.miss)) return err(429, 'Too many requests');
+        return g;
       }
       const since = Number(req.query.since);
       if (Number.isFinite(since) && since === rec.rev) return json(200, { unchanged: true, rev: rec.rev });
       // The host key hash never leaves the server.
       return json(200, {
         snapshot: rec.snapshot, rev: rec.rev, epoch: rec.epoch ?? 1, offer: publicOffer(rec, now),
-        expiresAt: rec.snapshot.updatedAt + SHARE_TTL_SECONDS * 1000
+        expiresAt: rec.expiresAt ?? rec.snapshot.updatedAt + SHARE_TTL_SECONDS * 1000
       });
     }
 
     if (method === 'PUT' || method === 'DELETE') {
       const rec = await load(store, code);
-      if (!rec) return err(404, 'Not found or expired');
+      if (!rec) return gone(store, code);
       if (!keyMatches(req.headers['x-host-key'], rec.keyHash)) return err(403, 'Only the host can change this table');
-      if (method === 'DELETE') { await store.del(`share:${code}`); return json(200, { ok: true }); }
+      if (method === 'DELETE') {
+        await store.del(`share:${code}`);
+        await store.set(`tomb:${code}`, '1', SHARE_TTL_SECONDS); // so viewers can be told it was stopped, not expired
+        return json(200, { ok: true });
+      }
       if (await limited(store, `rl:write:${code}`, limits.write)) return err(429, 'Too many updates');
       const snapshot = sanitizeSnapshot((req.body as { snapshot?: unknown } | null)?.snapshot, now);
       if (!snapshot) return err(400, 'Invalid session');
       const next: Record_ = { ...rec, snapshot, rev: rec.rev + 1 };
-      await store.set(`share:${code}`, JSON.stringify(next), SHARE_TTL_SECONDS); // rolling 7 days from the last host edit
+      await persist(store, code, next, now);
       return json(200, { rev: next.rev, epoch: next.epoch ?? 1, expiresAt: now + SHARE_TTL_SECONDS * 1000 });
     }
 
     return { ...err(405, 'Method not allowed'), headers: { Allow: 'GET, POST, PUT, DELETE', 'Cache-Control': 'no-store' } };
-  } catch {
+  } catch (e) {
+    if (e instanceof StorageNotConfigured) {
+      return json(503, { error: 'Sharing storage is not configured on this server', reason: 'storage_not_configured' });
+    }
     return err(500, 'Server error');
   }
 }
@@ -175,7 +213,7 @@ async function handleAction(
       return err(429, 'Too many attempts, try again later');
     }
     const rec = await load(store, code);
-    if (!rec) return err(404, 'Not found or expired');
+    if (!rec) return gone(store, code);
     const offer = liveOffer(rec, now);
     if (!offer) return err(404, 'No hand-over is open');
     const keyHash = typeof body.keyHash === 'string' ? body.keyHash : '';
@@ -187,20 +225,20 @@ async function handleAction(
         return err(403, 'This hand-over code is not valid');
       }
       const next: Record_ = { ...rec, keyHash, epoch: (rec.epoch ?? 1) + 1, rev: rec.rev + 1, offer: undefined };
-      await store.set(`share:${code}`, JSON.stringify(next), SHARE_TTL_SECONDS);
+      await persist(store, code, next, now);
       return json(200, { ok: true, snapshot: next.snapshot, rev: next.rev, epoch: next.epoch });
     }
 
     // seat offer: needs the host to confirm, so it only records the claim
     if (offer.claim && now - offer.claim.at < 2 * 60 * 1000) return err(409, 'Someone else already accepted — wait for the host');
     const next: Record_ = { ...rec, rev: rec.rev + 1, offer: { ...offer, claim: { keyHash, at: now } } };
-    await store.set(`share:${code}`, JSON.stringify(next), SHARE_TTL_SECONDS);
+    await persist(store, code, next, now);
     return json(200, { ok: true, rev: next.rev });
   }
 
   // everything below is host-only
   const rec = await load(store, code);
-  if (!rec) return err(404, 'Not found or expired');
+  if (!rec) return gone(store, code);
   if (!keyMatches(req.headers['x-host-key'], rec.keyHash)) return err(403, 'Only the host can change this table');
 
   if (action === 'verify') {
@@ -211,7 +249,7 @@ async function handleAction(
   if (action === 'offer') {
     if (method === 'DELETE') {
       const next: Record_ = { ...rec, rev: rec.rev + 1, offer: undefined };
-      await store.set(`share:${code}`, JSON.stringify(next), SHARE_TTL_SECONDS);
+      await persist(store, code, next, now);
       return json(200, { ok: true });
     }
     if (method !== 'POST') return err(405, 'Method not allowed');
@@ -230,7 +268,7 @@ async function handleAction(
       return err(400, 'Invalid offer');
     }
     const next: Record_ = { ...rec, rev: rec.rev + 1, offer };
-    await store.set(`share:${code}`, JSON.stringify(next), SHARE_TTL_SECONDS);
+    await persist(store, code, next, now);
     // the token is returned exactly once, to the host who asked for it
     return json(201, { offer: publicOffer(next, now), token, rev: next.rev });
   }
@@ -241,11 +279,11 @@ async function handleAction(
     if (!offer || offer.kind !== 'seat' || !offer.claim) return err(409, 'Nobody has accepted');
     if (body.approve === true) {
       const next: Record_ = { ...rec, keyHash: offer.claim.keyHash, epoch: (rec.epoch ?? 1) + 1, rev: rec.rev + 1, offer: undefined };
-      await store.set(`share:${code}`, JSON.stringify(next), SHARE_TTL_SECONDS);
+      await persist(store, code, next, now);
       return json(200, { ok: true, epoch: next.epoch });
     }
     const next: Record_ = { ...rec, rev: rec.rev + 1, offer: { ...offer, claim: undefined } };
-    await store.set(`share:${code}`, JSON.stringify(next), SHARE_TTL_SECONDS);
+    await persist(store, code, next, now);
     return json(200, { ok: true, declined: true });
   }
 
@@ -262,6 +300,7 @@ export function memoryStore(clock: () => number = Date.now): Store & { size(): n
     return e;
   };
   return {
+    kind: 'memory' as const,
     async get(k) { return live(k)?.v ?? null; },
     async set(k, v, ttl) { data.set(k, { v, exp: clock() + ttl * 1000 }); },
     async del(k) { data.delete(k); },

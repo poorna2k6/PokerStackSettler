@@ -195,6 +195,7 @@ function shareStatus(): string {
     case 'ok': return `● Live view on · synced ${sync.at}`;
     case 'syncing': return '● Live view on · syncing…';
     case 'offline': return '○ Live view paused (offline) — will catch up when you’re back online';
+    case 'unavailable': return '⚠️ Live view paused — the server’s sharing storage isn’t set up (see README)';
     default: return '● Live view on';
   }
 }
@@ -220,7 +221,7 @@ function openShareSheet() {
         } } });
         body.replaceChildren(
           h('p', { class: 'muted', text: 'Let everyone at the table watch live: each player’s buy-ins, chips and who pays whom. They get a link to a view-only page — only you can make changes.' }),
-          h('p', { class: 'muted small', text: 'Names and amounts are stored on a server and deleted 7 days after your last change. You can stop sharing at any time.' }),
+          h('p', { class: 'muted small', text: 'Names and amounts are stored on a server and deleted 7 days after your last change (every edit starts the 7 days again). You can stop sharing at any time.' }),
           ...(state.session.isDemo ? [h('p', { class: 'bad small', text: 'This is demo data — start a fresh session to share a real game.' })] : []),
           state.session.isDemo ? Object.assign(start, { disabled: true }) : start,
           h('button', { class: 'btn plain block', text: 'Not now', on: { click: close } }));
@@ -242,7 +243,7 @@ function openShareSheet() {
           h('button', { class: 'btn tinted', text: 'Copy link', on: { click: () => copyText(url) } }),
           h('button', { class: 'btn tinted', text: 'Copy code', on: { click: () => copyText(formatCode(share.code)) } })),
         statusEl,
-        h('p', { class: 'muted small', text: 'Viewers can’t edit anything. The link stays valid for 7 days after your last change, or until you stop sharing.' }),
+        h('p', { class: 'muted small', text: `Viewers can’t edit anything. ${sync.expiresAt ? `The link is valid until ${new Date(sync.expiresAt).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })} and` : 'The link'} stays valid for 7 days after your last change (every edit extends it), or until you stop sharing.` }),
         h('button', { class: 'btn tinted block', text: '🎩 Hand over the table', on: { click: () => { close(); openHandoverSheet(); } } }),
         h('button', { class: 'btn danger block', text: 'Stop sharing', on: { click: () => { close(); confirmSheet({
           title: 'Stop sharing?', message: 'The link and code stop working immediately for everyone watching.',

@@ -12,7 +12,7 @@ import { MAX_SEATS, avatar, chipStack, group, header, kpi, ovalTable } from './u
 const POLL_MS = 3000;
 const THEME_COLORS: Record<(typeof THEMES)[number], string> = { midnight: '#000000', felt: '#0a3d2a', ocean: '#06182c', light: '#f2f2f7' };
 
-type Phase = 'loading' | 'ok' | 'offline' | 'gone' | 'invalid';
+type Phase = 'loading' | 'ok' | 'offline' | 'unavailable' | 'gone' | 'invalid';
 
 export function mountViewer(rawCode: string) {
   const code = normalizeCode(rawCode);
@@ -27,6 +27,8 @@ export function mountViewer(rawCode: string) {
   let phase: Phase = code ? 'loading' : 'invalid';
   let updated = '';
   let failures = 0;
+  let miss404 = 0;
+  let goneReason: 'stopped' | 'expired_or_unknown' = 'expired_or_unknown';
   let timer: number | undefined;
   // The shared link opens on the oval table; the viewer can switch to the list. In memory only: a viewer
   // never writes anything to this device.
@@ -104,7 +106,16 @@ export function mountViewer(rawCode: string) {
       return [group(h('div', { class: 'row empty', attrs: { role: 'alert' } }, h('span', { text: 'That live-game code isn’t valid. Ask the host for the link again.' })))];
     }
     if (phase === 'gone') {
-      return [group(h('div', { class: 'row empty', attrs: { role: 'alert' } }, h('span', { text: 'This live game isn’t available any more — it expired or the host stopped sharing.' })))];
+      const stopped = goneReason === 'stopped';
+      return [
+        group(h('div', { class: 'row empty', attrs: { role: 'alert' } }, h('span', {
+          text: stopped ? 'The host stopped sharing this table.' : 'This link has expired or isn’t valid any more. Ask the host for a new link.'
+        }))),
+        h('button', { class: 'btn tinted block slim', text: 'Try again', on: { click: () => { phase = 'loading'; miss404 = 0; render(); void poll(); } } })
+      ];
+    }
+    if (phase === 'unavailable' && !snap) {
+      return [group(h('div', { class: 'row empty', attrs: { role: 'alert' } }, h('span', { text: 'Live sharing isn’t available right now — the server’s storage isn’t set up. Please tell the host.' })))];
     }
     if (!snap) {
       return [group(h('div', { class: 'row empty' }, h('span', { text: phase === 'offline' ? 'Can’t reach the server — retrying…' : 'Loading the table…' })))];
@@ -243,7 +254,8 @@ export function mountViewer(rawCode: string) {
     phase === 'invalid' ? 'Invalid code' :
     phase === 'ok' ? `● Live · updated ${updated}` :
     phase === 'offline' ? '○ Reconnecting…' :
-    phase === 'gone' ? 'Stopped' : '';
+    phase === 'unavailable' ? '⚠️ Sharing unavailable' :
+    phase === 'gone' ? (goneReason === 'stopped' ? 'Stopped' : 'Expired') : '';
 
   function render() {
     const pill = !snap ? null : h('span', { class: `pill ${snap.isEnded ? 'amber' : 'green'}`, text: snap.isEnded ? 'Settled' : 'Live' });
@@ -263,11 +275,20 @@ export function mountViewer(rawCode: string) {
     let next = POLL_MS;
     try {
       const res = await fetch(`/api/share?code=${code}${rev ? `&since=${rev}` : ''}`, { cache: 'no-store' });
-      if (res.status === 404) { phase = 'gone'; render(); return; }
+      if (res.status === 404) {
+        // A single 404 can be a hiccup in the backend; only believe it when it repeats.
+        const body = (await res.json().catch(() => ({}))) as { reason?: string };
+        goneReason = body.reason === 'stopped' ? 'stopped' : 'expired_or_unknown';
+        miss404 += 1;
+        if (miss404 >= 2) { phase = 'gone'; render(); return; }
+        throw new Error('miss');
+      }
+      if (res.status === 503) { phase = 'unavailable'; render(); timer = window.setTimeout(poll, 30000); return; }
       if (res.status === 429) { throw new Error('rate'); }
       if (!res.ok) throw new Error(String(res.status));
       const data = (await res.json()) as { unchanged?: boolean; rev: number; snapshot?: SharedSnapshot; offer?: PublicOffer };
       failures = 0;
+      miss404 = 0;
       const changed = (!data.unchanged && !!data.snapshot) || phase !== 'ok';
       if (!data.unchanged && data.snapshot) { snap = data.snapshot; rev = data.rev; offer = data.offer; }
       phase = 'ok';
@@ -279,7 +300,7 @@ export function mountViewer(rawCode: string) {
     } catch (e) {
       failures += 1;
       phase = 'offline';
-      next = Math.min(30000, POLL_MS * 2 ** Math.min(failures, 4)) * ((e as Error).message === 'rate' ? 3 : 1);
+      next = (e as Error).message === 'miss' ? 2000 : Math.min(30000, POLL_MS * 2 ** Math.min(failures, 4)) * ((e as Error).message === 'rate' ? 3 : 1);
       render();
     }
     if (document.visibilityState === 'visible') timer = window.setTimeout(poll, next);

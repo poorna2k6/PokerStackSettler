@@ -28,7 +28,7 @@ and the server rejects every write without it.
 - Viewer: open the link, or **Settings → Join a live game** and enter the code. Viewers get a separate
   read-only page that opens on the **oval table** (tap a seat for that player's buy-ins, chips and net) and can
   switch to a **list**; tables above 12 players show the list. It never loads or overwrites their own saved tables.
-- Data is stored for **7 days after the host's last change** (rolling), then deleted. Reads do not extend it.
+- Data is stored for **7 days after the host's last change** (rolling), then deleted. Reads do not extend it. The share sheet shows the date it is valid until.
 
 ### How it works
 ```
@@ -69,3 +69,13 @@ How it stays safe: the new host makes a fresh secret key on their own phone and 
 stored hash, so the old key stops working immediately and no usable key is ever stored or shown. The QR token is random,
 stored only as a hash, works once, expires in 10 minutes, and guessing is rate limited. The rules live in `server/handler.ts`
 (`handleAction`) with tests in `server/handler.test.ts`.
+
+### Sharing keeps disappearing? Check the storage first
+Symptoms of a missing Redis connection used to be a link that "expires" after minutes or hours (each serverless instance
+had its own memory). Now the function **refuses to run without storage on Vercel** and answers `503 storage_not_configured`;
+the host sees "Live sharing isn't set up on this server yet" and viewers see "Sharing unavailable".
+- Quick check: open `https://<your-site>/api/share?action=health` — `{"ok":true,"store":"redis"}` is healthy.
+- Fix: Vercel project → **Storage** → create/connect **Upstash Redis** → make sure `KV_REST_API_URL` and `KV_REST_API_TOKEN`
+  (or `UPSTASH_REDIS_REST_URL/TOKEN`) exist for **Production** → redeploy.
+- A link that is gone consistently after ~7 days simply expired (no host edit for 7 days). Opening the app extends it.
+- Viewers tell the difference: "the host stopped sharing" vs "expired or invalid link" vs "sharing unavailable".

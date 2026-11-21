@@ -93,6 +93,12 @@ function sanitizeSnapshot(raw, now = Date.now()) {
 }
 
 // server/handler.ts
+var StorageNotConfigured = class extends Error {
+  constructor() {
+    super("Sharing storage is not configured");
+    this.name = "StorageNotConfigured";
+  }
+};
 var MAX_BODY_BYTES = 32 * 1024;
 var LIMITS = {
   create: { max: 10, window: 3600 },
@@ -140,6 +146,17 @@ function publicOffer(rec, now) {
   if (!o) return void 0;
   return { kind: o.kind, playerId: o.playerId, expiresAt: o.expiresAt, status: o.claim ? "claimed" : "open" };
 }
+async function persist(store, code, rec, now) {
+  rec.expiresAt = now + SHARE_TTL_SECONDS * 1e3;
+  await store.set(`share:${code}`, JSON.stringify(rec), SHARE_TTL_SECONDS);
+}
+async function gone(store, code) {
+  const stopped = await store.get(`tomb:${code}`) !== null;
+  return json(404, {
+    error: stopped ? "The host stopped sharing this table" : "Not found or expired",
+    reason: stopped ? "stopped" : "expired_or_unknown"
+  });
+}
 async function limited(store, key, rule) {
   return await store.incr(key, rule.window) > rule.max;
 }
@@ -155,8 +172,12 @@ async function handleShare(req, store, now = Date.now(), limits = LIMITS) {
       for (let i = 0; i < 5 && await store.get(`share:${code2}`); i++) code2 = newCode();
       const hostKey = randomBytes(24).toString("base64url");
       const rec = { keyHash: sha256(hostKey), snapshot, rev: 1, createdAt: now, epoch: 1 };
-      await store.set(`share:${code2}`, JSON.stringify(rec), SHARE_TTL_SECONDS);
+      await persist(store, code2, rec, now);
       return json(201, { code: code2, hostKey, rev: 1, epoch: 1, expiresAt: now + SHARE_TTL_SECONDS * 1e3 });
+    }
+    if (method === "GET" && req.query.action === "health" && !req.query.code) {
+      await store.get("health:ping");
+      return json(200, { ok: true, store: store.kind ?? "unknown" });
     }
     const code = normalizeCode(req.query.code);
     if (!code) return err(400, "Invalid code");
@@ -165,8 +186,9 @@ async function handleShare(req, store, now = Date.now(), limits = LIMITS) {
       if (await limited(store, `rl:read:${ip}`, limits.read)) return err(429, "Too many requests");
       const rec = await load(store, code);
       if (!rec) {
-        if (await limited(store, `rl:miss:${ip}`, limits.miss)) return err(429, "Too many requests");
-        return err(404, "Not found or expired");
+        const g = await gone(store, code);
+        if (g.body.reason !== "stopped" && await limited(store, `rl:miss:${ip}`, limits.miss)) return err(429, "Too many requests");
+        return g;
       }
       const since = Number(req.query.since);
       if (Number.isFinite(since) && since === rec.rev) return json(200, { unchanged: true, rev: rec.rev });
@@ -175,26 +197,30 @@ async function handleShare(req, store, now = Date.now(), limits = LIMITS) {
         rev: rec.rev,
         epoch: rec.epoch ?? 1,
         offer: publicOffer(rec, now),
-        expiresAt: rec.snapshot.updatedAt + SHARE_TTL_SECONDS * 1e3
+        expiresAt: rec.expiresAt ?? rec.snapshot.updatedAt + SHARE_TTL_SECONDS * 1e3
       });
     }
     if (method === "PUT" || method === "DELETE") {
       const rec = await load(store, code);
-      if (!rec) return err(404, "Not found or expired");
+      if (!rec) return gone(store, code);
       if (!keyMatches(req.headers["x-host-key"], rec.keyHash)) return err(403, "Only the host can change this table");
       if (method === "DELETE") {
         await store.del(`share:${code}`);
+        await store.set(`tomb:${code}`, "1", SHARE_TTL_SECONDS);
         return json(200, { ok: true });
       }
       if (await limited(store, `rl:write:${code}`, limits.write)) return err(429, "Too many updates");
       const snapshot = sanitizeSnapshot(req.body?.snapshot, now);
       if (!snapshot) return err(400, "Invalid session");
       const next = { ...rec, snapshot, rev: rec.rev + 1 };
-      await store.set(`share:${code}`, JSON.stringify(next), SHARE_TTL_SECONDS);
+      await persist(store, code, next, now);
       return json(200, { rev: next.rev, epoch: next.epoch ?? 1, expiresAt: now + SHARE_TTL_SECONDS * 1e3 });
     }
     return { ...err(405, "Method not allowed"), headers: { Allow: "GET, POST, PUT, DELETE", "Cache-Control": "no-store" } };
-  } catch {
+  } catch (e) {
+    if (e instanceof StorageNotConfigured) {
+      return json(503, { error: "Sharing storage is not configured on this server", reason: "storage_not_configured" });
+    }
     return err(500, "Server error");
   }
 }
@@ -208,7 +234,7 @@ async function handleAction(req, store, code, now, limits, ip) {
       return err(429, "Too many attempts, try again later");
     }
     const rec2 = await load(store, code);
-    if (!rec2) return err(404, "Not found or expired");
+    if (!rec2) return gone(store, code);
     const offer = liveOffer(rec2, now);
     if (!offer) return err(404, "No hand-over is open");
     const keyHash = typeof body.keyHash === "string" ? body.keyHash : "";
@@ -219,16 +245,16 @@ async function handleAction(req, store, code, now, limits, ip) {
         return err(403, "This hand-over code is not valid");
       }
       const next2 = { ...rec2, keyHash, epoch: (rec2.epoch ?? 1) + 1, rev: rec2.rev + 1, offer: void 0 };
-      await store.set(`share:${code}`, JSON.stringify(next2), SHARE_TTL_SECONDS);
+      await persist(store, code, next2, now);
       return json(200, { ok: true, snapshot: next2.snapshot, rev: next2.rev, epoch: next2.epoch });
     }
     if (offer.claim && now - offer.claim.at < 2 * 60 * 1e3) return err(409, "Someone else already accepted \u2014 wait for the host");
     const next = { ...rec2, rev: rec2.rev + 1, offer: { ...offer, claim: { keyHash, at: now } } };
-    await store.set(`share:${code}`, JSON.stringify(next), SHARE_TTL_SECONDS);
+    await persist(store, code, next, now);
     return json(200, { ok: true, rev: next.rev });
   }
   const rec = await load(store, code);
-  if (!rec) return err(404, "Not found or expired");
+  if (!rec) return gone(store, code);
   if (!keyMatches(req.headers["x-host-key"], rec.keyHash)) return err(403, "Only the host can change this table");
   if (action === "verify") {
     if (method !== "POST") return err(405, "Method not allowed");
@@ -237,7 +263,7 @@ async function handleAction(req, store, code, now, limits, ip) {
   if (action === "offer") {
     if (method === "DELETE") {
       const next2 = { ...rec, rev: rec.rev + 1, offer: void 0 };
-      await store.set(`share:${code}`, JSON.stringify(next2), SHARE_TTL_SECONDS);
+      await persist(store, code, next2, now);
       return json(200, { ok: true });
     }
     if (method !== "POST") return err(405, "Method not allowed");
@@ -256,7 +282,7 @@ async function handleAction(req, store, code, now, limits, ip) {
       return err(400, "Invalid offer");
     }
     const next = { ...rec, rev: rec.rev + 1, offer };
-    await store.set(`share:${code}`, JSON.stringify(next), SHARE_TTL_SECONDS);
+    await persist(store, code, next, now);
     return json(201, { offer: publicOffer(next, now), token, rev: next.rev });
   }
   if (action === "approve") {
@@ -265,11 +291,11 @@ async function handleAction(req, store, code, now, limits, ip) {
     if (!offer || offer.kind !== "seat" || !offer.claim) return err(409, "Nobody has accepted");
     if (body.approve === true) {
       const next2 = { ...rec, keyHash: offer.claim.keyHash, epoch: (rec.epoch ?? 1) + 1, rev: rec.rev + 1, offer: void 0 };
-      await store.set(`share:${code}`, JSON.stringify(next2), SHARE_TTL_SECONDS);
+      await persist(store, code, next2, now);
       return json(200, { ok: true, epoch: next2.epoch });
     }
     const next = { ...rec, rev: rec.rev + 1, offer: { ...offer, claim: void 0 } };
-    await store.set(`share:${code}`, JSON.stringify(next), SHARE_TTL_SECONDS);
+    await persist(store, code, next, now);
     return json(200, { ok: true, declined: true });
   }
   return err(400, "Unknown action");
@@ -286,6 +312,7 @@ function memoryStore(clock = Date.now) {
     return e;
   };
   return {
+    kind: "memory",
     async get(k) {
       return live(k)?.v ?? null;
     },
@@ -308,9 +335,9 @@ function memoryStore(clock = Date.now) {
 }
 
 // server/store.ts
-function upstash(url, token) {
+function upstash(url, token, fetchImpl = fetch) {
   const cmd = async (args) => {
-    const res = await fetch(url, {
+    const res = await fetchImpl(url, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify(args)
@@ -319,6 +346,7 @@ function upstash(url, token) {
     return (await res.json()).result;
   };
   return {
+    kind: "redis",
     async get(key) {
       return await cmd(["GET", key]) ?? null;
     },
@@ -329,19 +357,30 @@ function upstash(url, token) {
       await cmd(["DEL", key]);
     },
     async incr(key, ttl) {
-      const n = Number(await cmd(["INCR", key]));
-      if (n === 1) await cmd(["EXPIRE", key, ttl]);
-      return n;
+      await cmd(["SET", key, 0, "EX", ttl, "NX"]);
+      return Number(await cmd(["INCR", key]));
     }
   };
 }
+function unconfiguredStore() {
+  const fail = async () => {
+    throw new StorageNotConfigured();
+  };
+  return { kind: "unconfigured", get: fail, set: fail, del: fail, incr: fail };
+}
+function pickStore(env, fetchImpl = fetch) {
+  const url = env.UPSTASH_REDIS_REST_URL ?? env.KV_REST_API_URL;
+  const token = env.UPSTASH_REDIS_REST_TOKEN ?? env.KV_REST_API_TOKEN;
+  if (url && token) return upstash(url, token, fetchImpl);
+  if (env.VERCEL && env.ALLOW_MEMORY_STORE !== "1") {
+    console.error("[share] Sharing storage is NOT configured: connect Upstash Redis to this Vercel project (Storage tab) and redeploy. Sharing is disabled until then.");
+    return unconfiguredStore();
+  }
+  return memoryStore();
+}
 var cached;
 function getStore() {
-  if (cached) return cached;
-  const url = process.env.UPSTASH_REDIS_REST_URL ?? process.env.KV_REST_API_URL;
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN ?? process.env.KV_REST_API_TOKEN;
-  cached = url && token ? upstash(url, token) : memoryStore();
-  return cached;
+  return cached ??= pickStore(process.env);
 }
 
 // server/vercel.ts

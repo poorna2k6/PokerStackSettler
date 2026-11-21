@@ -323,3 +323,86 @@ describe('hand-over', () => {
     expect((await act(env.call, data.code, 'verify', 'GET', { headers: hostHdr(data.hostKey) })).status).toBe(405);
   });
 });
+
+// ---------------------------------------------------------------------------------------------
+// Expiry hardening
+// ---------------------------------------------------------------------------------------------
+import { StorageNotConfigured, type Store } from './handler';
+
+describe('expiry reasons and honest expiry time', () => {
+  const DAY = 24 * 3600 * 1000;
+
+  it('a stopped table says "stopped", an unknown or expired one says "expired_or_unknown"', async () => {
+    const env = setup();
+    const { data } = await create(env.call);
+    await env.call(req('DELETE', { query: { code: data.code }, headers: { 'x-host-key': data.hostKey } }));
+    const stopped = await env.call(req('GET', { query: { code: data.code }, ip: '3.3.3.3' }));
+    expect(stopped.status).toBe(404);
+    expect((stopped.body as { reason: string }).reason).toBe('stopped');
+    const unknown = await env.call(req('GET', { query: { code: 'ZZZZZZZZ' }, ip: '3.3.3.4' }));
+    expect((unknown.body as { reason: string }).reason).toBe('expired_or_unknown');
+
+    const e2 = setup();
+    const c2 = await create(e2.call);
+    e2.clock.advance(8 * DAY);
+    const expired = await e2.call(req('GET', { query: { code: c2.data.code }, ip: '3.3.3.5' }));
+    expect(expired.status).toBe(404);
+    expect((expired.body as { reason: string }).reason).toBe('expired_or_unknown');
+  });
+
+  it('looking up a stopped table does not use up the code-guessing budget', async () => {
+    const env = setup();
+    const { data } = await create(env.call);
+    await env.call(req('DELETE', { query: { code: data.code }, headers: { 'x-host-key': data.hostKey } }));
+    let last = 0;
+    for (let i = 0; i < 60; i++) last = (await env.call(req('GET', { query: { code: data.code }, ip: '4.4.4.4' }))).status;
+    expect(last).toBe(404); // never 429
+  });
+
+  it('reports the real expiry, including after hand-over writes that refresh the stored lifetime', async () => {
+    const env = setup();
+    const { data } = await create(env.call);
+    env.clock.advance(3 * DAY);
+    await env.call(req('POST', { query: { code: data.code, action: 'offer' }, headers: { 'x-host-key': data.hostKey }, body: { kind: 'link' } }));
+    const view = await env.call(req('GET', { query: { code: data.code }, ip: '5.5.5.5' }));
+    const exp = (view.body as { expiresAt: number }).expiresAt;
+    expect(exp).toBe(env.clock.now() + 7 * DAY); // used to understate it (3 days too early)
+    // and the store really keeps it that long
+    env.clock.advance(6 * DAY);
+    expect((await env.call(req('GET', { query: { code: data.code }, ip: '5.5.5.6' }))).status).toBe(200);
+  });
+});
+
+describe('storage health and the unconfigured store', () => {
+  const unconfigured: Store = {
+    kind: 'unconfigured',
+    get: async () => { throw new StorageNotConfigured(); },
+    set: async () => { throw new StorageNotConfigured(); },
+    del: async () => { throw new StorageNotConfigured(); },
+    incr: async () => { throw new StorageNotConfigured(); }
+  };
+
+  it('health reports the backend; without one every call is a clear 503, not a random 404', async () => {
+    const ok = await handleShare(req('GET', { query: { action: 'health' } }), memoryStore());
+    expect(ok.status).toBe(200);
+    expect(ok.body).toMatchObject({ ok: true, store: 'memory' });
+
+    const health = await handleShare(req('GET', { query: { action: 'health' } }), unconfigured);
+    expect(health.status).toBe(503);
+    expect(health.body).toMatchObject({ reason: 'storage_not_configured' });
+    for (const r of [req('POST', { body: { snapshot: snap() } }), req('GET', { query: { code: 'ABCDEFGH' } }), req('PUT', { query: { code: 'ABCDEFGH' } })]) {
+      const res = await handleShare(r, unconfigured);
+      expect(res.status).toBe(503);
+      expect((res.body as { reason: string }).reason).toBe('storage_not_configured');
+    }
+  });
+
+  it('documents the failure mode the unconfigured store prevents: two memory instances disagree', async () => {
+    const a = memoryStore();
+    const b = memoryStore();
+    const made = await handleShare(req('POST', { body: { snapshot: snap() } }), a);
+    const code = (made.body as { code: string }).code;
+    expect((await handleShare(req('GET', { query: { code }, ip: '8.1.1.1' }), a)).status).toBe(200);
+    expect((await handleShare(req('GET', { query: { code }, ip: '8.1.1.2' }), b)).status).toBe(404);
+  });
+});

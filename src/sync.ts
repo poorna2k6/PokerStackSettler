@@ -8,8 +8,11 @@ const API = '/api/share';
 const PUSH_DELAY_MS = 600;
 const RETRY_MS = 15000;
 
-export type SyncPhase = 'off' | 'syncing' | 'ok' | 'offline' | 'expired';
-export const sync: { phase: SyncPhase; at: string } = { phase: 'off', at: '' };
+export type SyncPhase = 'off' | 'syncing' | 'ok' | 'offline' | 'unavailable' | 'expired';
+/** expiresAt: when the server will drop the link if the host makes no further change (ms since epoch). */
+export const sync: { phase: SyncPhase; at: string; expiresAt?: number } = { phase: 'off', at: '' };
+let lastOkAt = 0;
+let missCount = 0;
 
 function setPhase(phase: SyncPhase, at = sync.at) {
   if (sync.phase === phase && sync.at === at) return;
@@ -57,9 +60,13 @@ export const shareUrl = (code: string) => `${location.origin}${location.pathname
 export async function startSharing(): Promise<string | null> {
   if (state.session.isDemo) return 'Demo data can’t be shared — start a fresh session first.';
   try {
-    const r = await call<{ code: string; hostKey: string; error?: string }>('POST', '', { snapshot: shareSnapshot() });
+    const r = await call<{ code: string; hostKey: string; error?: string; reason?: string; expiresAt?: number }>('POST', '', { snapshot: shareSnapshot() });
+    if (r.status === 503 && r.data?.reason === 'storage_not_configured') return 'Live sharing isn’t set up on this server yet (its storage is not connected). See the README, section “Deploying on Vercel”.';
     if (r.status !== 201 || !normalizeCode(r.data?.code)) return r.data?.error ?? 'Could not start sharing. Check your connection and try again.';
     setShare({ code: r.data.code, hostKey: r.data.hostKey });
+    sync.expiresAt = r.data.expiresAt;
+    lastOkAt = Date.now();
+    missCount = 0;
     setPhase('ok', clock());
     return null;
   } catch {
@@ -135,17 +142,36 @@ async function flush() {
   dirty = false;
   inFlight = true;
   try {
-    const r = await call('PUT', `?code=${share.code}`, { snapshot: shareSnapshot() }, share.hostKey);
+    const r = await call<{ expiresAt?: number; reason?: string }>('PUT', `?code=${share.code}`, { snapshot: shareSnapshot() }, share.hostKey);
     if (r.status === 200) {
+      missCount = 0;
+      lastOkAt = Date.now();
+      if (r.data?.expiresAt) sync.expiresAt = r.data.expiresAt;
       setPhase('ok', clock());
+    } else if (r.status === 503) {
+      // the server has no storage: keep the key, say so, and try again slowly
+      dirty = true;
+      setPhase('unavailable');
+      clearTimeout(retryTimer);
+      retryTimer = window.setTimeout(flush, 60000);
     } else if (r.status === 403) {
       // the host key no longer matches: the table was handed to someone else
       handedOver(share.code);
     } else if (r.status === 404) {
-      // expired (7 days without a host edit) or stopped elsewhere
-      setShare(undefined);
-      setPhase('expired', '');
-      toast('Your live link expired — share again to get a new one', 'error');
+      // One 404 is not proof: a flaky backend can answer it for a link that is fine. Only give up (and discard the
+      // key) after three misses in a row, spaced out.
+      missCount += 1;
+      if (missCount < 3) {
+        dirty = true;
+        setPhase('offline');
+        clearTimeout(retryTimer);
+        retryTimer = window.setTimeout(flush, 5000);
+      } else {
+        missCount = 0;
+        setShare(undefined);
+        setPhase('expired', '');
+        toast(r.data?.reason === 'stopped' ? 'This live link was stopped — share again to get a new one' : 'Your live link expired — share again to get a new one', 'error');
+      }
     } else {
       throw new Error(String(r.status));
     }
@@ -173,8 +199,10 @@ function schedule() {
 
 onCommit(schedule);
 window.addEventListener('online', () => { void drainPendingStops(); if (state.session.share) { clearTimeout(retryTimer); void flush(); } });
+// Coming back to the app (a PWA is resumed, not reloaded): catch up, and refresh the link's lifetime if it has been a while.
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && state.session.share && sync.phase === 'offline') void flush();
+  if (document.visibilityState !== 'visible' || !state.session.share || state.session.isDemo) return;
+  if (sync.phase === 'offline' || sync.phase === 'unavailable' || Date.now() - lastOkAt > 5 * 60 * 1000) { clearTimeout(retryTimer); void flush(); }
 });
 void drainPendingStops();
 // A session restored from storage that was being shared: push the current state (and refresh its 7 days).
