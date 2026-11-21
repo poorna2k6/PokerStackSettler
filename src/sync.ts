@@ -1,6 +1,6 @@
 // Host side of live sharing. The host's device stays the single source of truth and the only writer:
 // it pushes snapshots to /api/share using a secret host key that never leaves this device.
-import { confirmSheet, toast } from './dom';
+import { closeAllSheets, confirmSheet, toast } from './dom';
 import { normalizeCode, type SharedSnapshot } from './shared';
 import { notify, onCommit, onShareOrphaned, setShare, shareSnapshot, state } from './state';
 
@@ -47,12 +47,13 @@ export async function call<T>(method: string, query: string, body?: unknown, hos
 export function handedOver(code: string, who?: string) {
   if (state.session.share?.code === code) setShare(undefined);
   setPhase('off', '');
-  confirmSheet({
+  closeAllSheets(); // e.g. a 'Hand over the table' sheet that no longer applies
+  setTimeout(() => confirmSheet({
     title: 'Table handed over',
     message: `${who ? `${who} is` : 'Someone else is'} now the host of “${state.session.name}”. Your own copy stays on this phone.`,
     confirmLabel: 'Watch live', cancelLabel: 'Keep my copy',
     onConfirm: () => { location.hash = `#/v/${code}`; }
-  });
+  }), 240);
 }
 
 export const shareUrl = (code: string) => `${location.origin}${location.pathname}#/v/${code}`;

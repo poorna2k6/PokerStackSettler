@@ -22,7 +22,8 @@ export function shareApiMiddleware() {
       chunks.push(c as Buffer);
     }
     let body: unknown = null;
-    try { body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : null; } catch { body = null; }
+    const isJson = String(req.headers['content-type'] ?? '').toLowerCase().startsWith('application/json');
+    try { body = chunks.length && isJson ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : null; } catch { body = null; }
     const url = new URL(req.url, 'http://localhost');
     const query: Record<string, string | undefined> = {};
     for (const [k, v] of url.searchParams) query[k] = v;

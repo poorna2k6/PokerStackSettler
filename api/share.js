@@ -109,10 +109,8 @@ var LIMITS = {
   // polls per IP per hour (a household shares one IP)
   miss: { max: 40, window: 3600 },
   // unknown-code lookups per IP per hour: stops code guessing
-  claim: { max: 40, window: 3600 },
-  // handover claims per IP per hour
-  claimCode: { max: 60, window: 3600 }
-  // handover claims per code per hour (stops token guessing)
+  claim: { max: 40, window: 3600 }
+  // per IP per hour: seat requests and FAILED token attempts (a valid token is never throttled)
 };
 var sha256 = (s) => createHash("sha256").update(s).digest("hex");
 var json = (status, body, extra = {}) => ({ status, body, headers: { "Cache-Control": "no-store", ...extra } });
@@ -146,9 +144,31 @@ function publicOffer(rec, now) {
   if (!o) return void 0;
   return { kind: o.kind, playerId: o.playerId, expiresAt: o.expiresAt, status: o.claim ? "claimed" : "open" };
 }
-async function persist(store, code, rec, now) {
-  rec.expiresAt = now + SHARE_TTL_SECONDS * 1e3;
-  await store.set(`share:${code}`, JSON.stringify(rec), SHARE_TTL_SECONDS);
+async function mutate(store, code, now, fn) {
+  const key = `share:${code}`;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const raw = await store.get(key);
+    let rec = null;
+    if (raw) {
+      try {
+        rec = JSON.parse(raw);
+      } catch {
+        rec = null;
+      }
+    }
+    const step = await fn(rec);
+    if (step.remove && raw) {
+      if (await store.delIf(key, raw)) {
+        await store.set(`tomb:${code}`, "1", SHARE_TTL_SECONDS);
+        return step.res;
+      }
+      continue;
+    }
+    if (!step.next) return step.res;
+    step.next.expiresAt = now + SHARE_TTL_SECONDS * 1e3;
+    if (await store.setIf(key, JSON.stringify(step.next), SHARE_TTL_SECONDS, raw)) return step.res;
+  }
+  return err(409, "The table is busy \u2014 try again");
 }
 async function gone(store, code) {
   const stopped = await store.get(`tomb:${code}`) !== null;
@@ -168,12 +188,15 @@ async function handleShare(req, store, now = Date.now(), limits = LIMITS) {
       if (await limited(store, `rl:create:${ip}`, limits.create)) return err(429, "Too many new shares, try again later");
       const snapshot = sanitizeSnapshot(req.body?.snapshot, now);
       if (!snapshot) return err(400, "Invalid session");
-      let code2 = newCode();
-      for (let i = 0; i < 5 && await store.get(`share:${code2}`); i++) code2 = newCode();
       const hostKey = randomBytes(24).toString("base64url");
-      const rec = { keyHash: sha256(hostKey), snapshot, rev: 1, createdAt: now, epoch: 1 };
-      await persist(store, code2, rec, now);
-      return json(201, { code: code2, hostKey, rev: 1, epoch: 1, expiresAt: now + SHARE_TTL_SECONDS * 1e3 });
+      const rec = { keyHash: sha256(hostKey), snapshot, rev: 1, createdAt: now, epoch: 1, expiresAt: now + SHARE_TTL_SECONDS * 1e3 };
+      for (let i = 0; i < 5; i++) {
+        const code2 = newCode();
+        if (await store.setIf(`share:${code2}`, JSON.stringify(rec), SHARE_TTL_SECONDS, null)) {
+          return json(201, { code: code2, hostKey, rev: 1, epoch: 1, expiresAt: rec.expiresAt });
+        }
+      }
+      return err(500, "Could not allocate a code");
     }
     if (method === "GET" && req.query.action === "health" && !req.query.code) {
       await store.get("health:ping");
@@ -201,20 +224,23 @@ async function handleShare(req, store, now = Date.now(), limits = LIMITS) {
       });
     }
     if (method === "PUT" || method === "DELETE") {
-      const rec = await load(store, code);
-      if (!rec) return gone(store, code);
-      if (!keyMatches(req.headers["x-host-key"], rec.keyHash)) return err(403, "Only the host can change this table");
-      if (method === "DELETE") {
-        await store.del(`share:${code}`);
-        await store.set(`tomb:${code}`, "1", SHARE_TTL_SECONDS);
-        return json(200, { ok: true });
+      const hostKey = req.headers["x-host-key"];
+      if (method === "PUT") {
+        if (await limited(store, `rl:write:${code}`, limits.write)) return err(429, "Too many updates");
+        const snapshot = sanitizeSnapshot(req.body?.snapshot, now);
+        if (!snapshot) return err(400, "Invalid session");
+        return mutate(store, code, now, async (rec) => {
+          if (!rec) return { res: await gone(store, code) };
+          if (!keyMatches(hostKey, rec.keyHash)) return { res: err(403, "Only the host can change this table") };
+          const next = { ...rec, snapshot, rev: rec.rev + 1 };
+          return { next, res: json(200, { rev: next.rev, epoch: next.epoch ?? 1, expiresAt: now + SHARE_TTL_SECONDS * 1e3 }) };
+        });
       }
-      if (await limited(store, `rl:write:${code}`, limits.write)) return err(429, "Too many updates");
-      const snapshot = sanitizeSnapshot(req.body?.snapshot, now);
-      if (!snapshot) return err(400, "Invalid session");
-      const next = { ...rec, snapshot, rev: rec.rev + 1 };
-      await persist(store, code, next, now);
-      return json(200, { rev: next.rev, epoch: next.epoch ?? 1, expiresAt: now + SHARE_TTL_SECONDS * 1e3 });
+      return mutate(store, code, now, async (rec) => {
+        if (!rec) return { res: await gone(store, code) };
+        if (!keyMatches(hostKey, rec.keyHash)) return { res: err(403, "Only the host can change this table") };
+        return { remove: true, res: json(200, { ok: true }) };
+      });
     }
     return { ...err(405, "Method not allowed"), headers: { Allow: "GET, POST, PUT, DELETE", "Cache-Control": "no-store" } };
   } catch (e) {
@@ -230,74 +256,92 @@ async function handleAction(req, store, code, now, limits, ip) {
   const body = req.body && typeof req.body === "object" ? req.body : {};
   if (action === "claim") {
     if (method !== "POST") return err(405, "Method not allowed");
-    if (await limited(store, `rl:claim:${ip}`, limits.claim) || await limited(store, `rl:claimcode:${code}`, limits.claimCode)) {
-      return err(429, "Too many attempts, try again later");
-    }
-    const rec2 = await load(store, code);
-    if (!rec2) return gone(store, code);
-    const offer = liveOffer(rec2, now);
-    if (!offer) return err(404, "No hand-over is open");
     const keyHash = typeof body.keyHash === "string" ? body.keyHash : "";
     if (!KEY_HASH_RE.test(keyHash)) return err(400, "Invalid key");
-    if (offer.kind === "link") {
-      const token = typeof body.token === "string" ? body.token : "";
-      if (!token || token.length > 200 || !offer.tokenHash || !keyMatches(token, offer.tokenHash)) {
-        return err(403, "This hand-over code is not valid");
+    const token = typeof body.token === "string" ? body.token : "";
+    const throttled = () => limited(store, `rl:claim:${ip}`, limits.claim);
+    let counted = false;
+    const countOnce = async () => {
+      if (counted) return false;
+      counted = true;
+      return throttled();
+    };
+    return mutate(store, code, now, async (rec2) => {
+      if (!rec2) return { res: await gone(store, code) };
+      const offer = liveOffer(rec2, now);
+      if (!offer) return { res: err(404, "No hand-over is open") };
+      if (offer.kind === "link") {
+        if (!token || token.length > 200 || !offer.tokenHash || !keyMatches(token, offer.tokenHash)) {
+          return { res: await countOnce() ? err(429, "Too many attempts, try again later") : err(403, "This hand-over code is not valid") };
+        }
+        const next2 = { ...rec2, keyHash, epoch: (rec2.epoch ?? 1) + 1, rev: rec2.rev + 1, offer: void 0 };
+        return { next: next2, res: json(200, { ok: true, snapshot: next2.snapshot, rev: next2.rev, epoch: next2.epoch }) };
       }
-      const next2 = { ...rec2, keyHash, epoch: (rec2.epoch ?? 1) + 1, rev: rec2.rev + 1, offer: void 0 };
-      await persist(store, code, next2, now);
-      return json(200, { ok: true, snapshot: next2.snapshot, rev: next2.rev, epoch: next2.epoch });
-    }
-    if (offer.claim && now - offer.claim.at < 2 * 60 * 1e3) return err(409, "Someone else already accepted \u2014 wait for the host");
-    const next = { ...rec2, rev: rec2.rev + 1, offer: { ...offer, claim: { keyHash, at: now } } };
-    await persist(store, code, next, now);
-    return json(200, { ok: true, rev: next.rev });
+      if (offer.claim && now - offer.claim.at < 2 * 60 * 1e3) return { res: err(409, "Someone else already accepted \u2014 wait for the host") };
+      if (await countOnce()) return { res: err(429, "Too many attempts, try again later") };
+      const next = { ...rec2, rev: rec2.rev + 1, offer: { ...offer, claim: { keyHash, at: now } } };
+      return { next, res: json(200, { ok: true, rev: next.rev }) };
+    });
   }
-  const rec = await load(store, code);
-  if (!rec) return gone(store, code);
-  if (!keyMatches(req.headers["x-host-key"], rec.keyHash)) return err(403, "Only the host can change this table");
+  const hostKey = req.headers["x-host-key"];
   if (action === "verify") {
     if (method !== "POST") return err(405, "Method not allowed");
-    return json(200, { ok: true, epoch: rec.epoch ?? 1 });
+    const rec2 = await load(store, code);
+    if (!rec2) return gone(store, code);
+    if (!keyMatches(hostKey, rec2.keyHash)) return err(403, "Only the host can change this table");
+    return json(200, { ok: true, epoch: rec2.epoch ?? 1 });
   }
   if (action === "offer") {
     if (method === "DELETE") {
-      const next2 = { ...rec, rev: rec.rev + 1, offer: void 0 };
-      await persist(store, code, next2, now);
-      return json(200, { ok: true });
+      return mutate(store, code, now, async (rec2) => {
+        if (!rec2) return { res: await gone(store, code) };
+        if (!keyMatches(hostKey, rec2.keyHash)) return { res: err(403, "Only the host can change this table") };
+        return { next: { ...rec2, rev: rec2.rev + 1, offer: void 0 }, res: json(200, { ok: true }) };
+      });
     }
     if (method !== "POST") return err(405, "Method not allowed");
     if (await limited(store, `rl:write:${code}`, limits.write)) return err(429, "Too many updates");
     const kind = body.kind;
-    let offer;
-    let token;
-    if (kind === "seat") {
-      const playerId = typeof body.playerId === "string" ? body.playerId : "";
-      if (!rec.snapshot.players.some((p) => p.id === playerId)) return err(400, "Unknown player");
-      offer = { kind: "seat", playerId, expiresAt: now + OFFER_TTL_MS };
-    } else if (kind === "link") {
-      token = randomBytes(18).toString("base64url");
-      offer = { kind: "link", tokenHash: sha256hex(token), expiresAt: now + OFFER_TTL_MS };
-    } else {
+    if (kind !== "seat" && kind !== "link") {
+      const rec2 = await load(store, code);
+      if (!rec2) return gone(store, code);
+      if (!keyMatches(hostKey, rec2.keyHash)) return err(403, "Only the host can change this table");
       return err(400, "Invalid offer");
     }
-    const next = { ...rec, rev: rec.rev + 1, offer };
-    await persist(store, code, next, now);
-    return json(201, { offer: publicOffer(next, now), token, rev: next.rev });
+    return mutate(store, code, now, async (rec2) => {
+      if (!rec2) return { res: await gone(store, code) };
+      if (!keyMatches(hostKey, rec2.keyHash)) return { res: err(403, "Only the host can change this table") };
+      let offer;
+      let token;
+      if (kind === "seat") {
+        const playerId = typeof body.playerId === "string" ? body.playerId : "";
+        if (!rec2.snapshot.players.some((p) => p.id === playerId)) return { res: err(400, "Unknown player") };
+        offer = { kind: "seat", playerId, expiresAt: now + OFFER_TTL_MS };
+      } else {
+        token = randomBytes(18).toString("base64url");
+        offer = { kind: "link", tokenHash: sha256hex(token), expiresAt: now + OFFER_TTL_MS };
+      }
+      const next = { ...rec2, rev: rec2.rev + 1, offer };
+      return { next, res: json(201, { offer: publicOffer(next, now), token, rev: next.rev }) };
+    });
   }
   if (action === "approve") {
     if (method !== "POST") return err(405, "Method not allowed");
-    const offer = liveOffer(rec, now);
-    if (!offer || offer.kind !== "seat" || !offer.claim) return err(409, "Nobody has accepted");
-    if (body.approve === true) {
-      const next2 = { ...rec, keyHash: offer.claim.keyHash, epoch: (rec.epoch ?? 1) + 1, rev: rec.rev + 1, offer: void 0 };
-      await persist(store, code, next2, now);
-      return json(200, { ok: true, epoch: next2.epoch });
-    }
-    const next = { ...rec, rev: rec.rev + 1, offer: { ...offer, claim: void 0 } };
-    await persist(store, code, next, now);
-    return json(200, { ok: true, declined: true });
+    return mutate(store, code, now, async (rec2) => {
+      if (!rec2) return { res: await gone(store, code) };
+      if (!keyMatches(hostKey, rec2.keyHash)) return { res: err(403, "Only the host can change this table") };
+      const offer = liveOffer(rec2, now);
+      if (!offer || offer.kind !== "seat" || !offer.claim) return { res: err(409, "Nobody has accepted") };
+      if (body.approve === true) {
+        const next = { ...rec2, keyHash: offer.claim.keyHash, epoch: (rec2.epoch ?? 1) + 1, rev: rec2.rev + 1, offer: void 0 };
+        return { next, res: json(200, { ok: true, epoch: next.epoch }) };
+      }
+      return { next: { ...rec2, rev: rec2.rev + 1, offer: { ...offer, claim: void 0 } }, res: json(200, { ok: true, declined: true }) };
+    });
   }
+  const rec = await load(store, code);
+  if (!rec) return gone(store, code);
+  if (!keyMatches(hostKey, rec.keyHash)) return err(403, "Only the host can change this table");
   return err(400, "Unknown action");
 }
 function memoryStore(clock = Date.now) {
@@ -322,6 +366,16 @@ function memoryStore(clock = Date.now) {
     async del(k) {
       data.delete(k);
     },
+    async setIf(k, v, ttl, expected) {
+      if ((live(k)?.v ?? null) !== expected) return false;
+      data.set(k, { v, exp: clock() + ttl * 1e3 });
+      return true;
+    },
+    async delIf(k, expected) {
+      if (live(k)?.v !== expected) return false;
+      data.delete(k);
+      return true;
+    },
     async incr(k, ttl) {
       const e = live(k);
       const n = e ? Number(e.v) + 1 : 1;
@@ -335,6 +389,8 @@ function memoryStore(clock = Date.now) {
 }
 
 // server/store.ts
+var SET_IF = "local c = redis.call('GET', KEYS[1]); if (c == false and ARGV[1] == '') or c == ARGV[1] then redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3]); return 1 end; return 0";
+var DEL_IF = "if redis.call('GET', KEYS[1]) == ARGV[1] then redis.call('DEL', KEYS[1]); return 1 end; return 0";
 function upstash(url, token, fetchImpl = fetch) {
   const cmd = async (args) => {
     const res = await fetchImpl(url, {
@@ -356,6 +412,13 @@ function upstash(url, token, fetchImpl = fetch) {
     async del(key) {
       await cmd(["DEL", key]);
     },
+    // Compare-and-set as small Lua scripts so the check and the write are one atomic step on the Redis server.
+    async setIf(key, value, ttl, expected) {
+      return Number(await cmd(["EVAL", SET_IF, 1, key, expected ?? "", value, ttl])) === 1;
+    },
+    async delIf(key, expected) {
+      return Number(await cmd(["EVAL", DEL_IF, 1, key, expected])) === 1;
+    },
     async incr(key, ttl) {
       await cmd(["SET", key, 0, "EX", ttl, "NX"]);
       return Number(await cmd(["INCR", key]));
@@ -366,7 +429,7 @@ function unconfiguredStore() {
   const fail = async () => {
     throw new StorageNotConfigured();
   };
-  return { kind: "unconfigured", get: fail, set: fail, del: fail, incr: fail };
+  return { kind: "unconfigured", get: fail, set: fail, del: fail, setIf: fail, delIf: fail, incr: fail };
 }
 function pickStore(env, fetchImpl = fetch) {
   const url = env.UPSTASH_REDIS_REST_URL ?? env.KV_REST_API_URL;

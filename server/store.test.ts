@@ -41,3 +41,37 @@ describe('upstash store', () => {
     await expect(upstash('https://redis.example', 'tok', fake).get('k')).rejects.toThrow('Upstash 502');
   });
 });
+
+describe('compare-and-set', () => {
+  it('memory store: setIf/delIf only act on the expected value', async () => {
+    const { memoryStore } = await import('./handler');
+    const m = memoryStore();
+    expect(await m.setIf('k', 'v1', 60, null)).toBe(true);
+    expect(await m.setIf('k', 'v2', 60, null)).toBe(false);   // must not exist
+    expect(await m.setIf('k', 'v2', 60, 'zzz')).toBe(false);  // wrong expected
+    expect(await m.setIf('k', 'v2', 60, 'v1')).toBe(true);
+    expect(await m.get('k')).toBe('v2');
+    expect(await m.delIf('k', 'v1')).toBe(false);
+    expect(await m.delIf('k', 'v2')).toBe(true);
+    expect(await m.get('k')).toBeNull();
+  });
+
+  it('redis store: sends one atomic EVAL per compare-and-set and reads the 1/0 result', async () => {
+    const calls: unknown[][] = [];
+    const fake = (async (_u: string, init: RequestInit) => {
+      const args = JSON.parse(String(init.body)) as unknown[];
+      calls.push(args);
+      return { ok: true, json: async () => ({ result: 1 }) } as Response;
+    }) as unknown as typeof fetch;
+    const r = upstash('https://redis.example', 't', fake);
+    expect(await r.setIf('share:A', '{"a":1}', 604800, null)).toBe(true);
+    expect(await r.setIf('share:A', '{"a":2}', 604800, '{"a":1}')).toBe(true);
+    expect(await r.delIf('share:A', '{"a":2}')).toBe(true);
+    expect(calls[0].slice(0, 3)).toEqual(['EVAL', expect.stringContaining("redis.call('SET'"), 1]);
+    expect(calls[0].slice(3)).toEqual(['share:A', '', '{"a":1}', 604800]);          // '' = "must not exist"
+    expect(calls[1].slice(3)).toEqual(['share:A', '{"a":1}', '{"a":2}', 604800]);
+    expect(calls[2].slice(3)).toEqual(['share:A', '{"a":2}']);
+    const lost = (async () => ({ ok: true, json: async () => ({ result: 0 }) }) as unknown as Response) as unknown as typeof fetch;
+    expect(await upstash('https://redis.example', 't', lost).setIf('k', 'v', 60, 'x')).toBe(false);
+  });
+});

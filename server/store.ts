@@ -7,6 +7,9 @@
 // (or when ALLOW_MEMORY_STORE=1 is set on purpose).
 import { StorageNotConfigured, memoryStore, type Store } from './handler';
 
+const SET_IF = "local c = redis.call('GET', KEYS[1]); if (c == false and ARGV[1] == '') or c == ARGV[1] then redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3]); return 1 end; return 0";
+const DEL_IF = "if redis.call('GET', KEYS[1]) == ARGV[1] then redis.call('DEL', KEYS[1]); return 1 end; return 0";
+
 export function upstash(url: string, token: string, fetchImpl: typeof fetch = fetch): Store {
   const cmd = async (args: (string | number)[]): Promise<unknown> => {
     const res = await fetchImpl(url, {
@@ -22,6 +25,13 @@ export function upstash(url: string, token: string, fetchImpl: typeof fetch = fe
     async get(key) { return ((await cmd(['GET', key])) as string | null) ?? null; },
     async set(key, value, ttl) { await cmd(['SET', key, value, 'EX', ttl]); },
     async del(key) { await cmd(['DEL', key]); },
+    // Compare-and-set as small Lua scripts so the check and the write are one atomic step on the Redis server.
+    async setIf(key, value, ttl, expected) {
+      return Number(await cmd(['EVAL', SET_IF, 1, key, expected ?? '', value, ttl])) === 1;
+    },
+    async delIf(key, expected) {
+      return Number(await cmd(['EVAL', DEL_IF, 1, key, expected])) === 1;
+    },
     async incr(key, ttl) {
       // Create the key WITH its expiry first (no-op if it exists), then increment: a failure between the two
       // calls can no longer leave a counter that never expires.
@@ -33,7 +43,7 @@ export function upstash(url: string, token: string, fetchImpl: typeof fetch = fe
 
 export function unconfiguredStore(): Store {
   const fail = async (): Promise<never> => { throw new StorageNotConfigured(); };
-  return { kind: 'unconfigured', get: fail, set: fail, del: fail, incr: fail };
+  return { kind: 'unconfigured', get: fail, set: fail, del: fail, setIf: fail, delIf: fail, incr: fail };
 }
 
 export function pickStore(env: Record<string, string | undefined>, fetchImpl: typeof fetch = fetch): Store {

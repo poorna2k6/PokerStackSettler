@@ -101,6 +101,16 @@ export function openSheet(title: string, build: (close: () => void) => Node): Sh
   return { close };
 }
 
+/** Closes every open sheet at once (used when the situation under them changed, e.g. the host role moved). */
+export function closeAllSheets() {
+  const root = document.getElementById('sheets');
+  if (!root) return;
+  for (const el of [...root.children]) {
+    el.classList.remove('in');
+    setTimeout(() => el.remove(), 220);
+  }
+}
+
 export interface ConfirmOpts {
   title: string;
   message: string;

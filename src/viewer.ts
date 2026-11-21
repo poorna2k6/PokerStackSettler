@@ -94,9 +94,9 @@ export function mountViewer(rawCode: string) {
         h('strong', { text: mine ? '⏳ Waiting for the host to confirm…' : `${name} accepted — waiting for the host.` }));
     }
     return h('div', { class: 'offer-card', attrs: { role: 'alert' } },
-      h('div', { class: 'grow' }, h('strong', { text: `🎩 The host wants to hand the table over to ${name}.` }),
-        h('div', { class: 'small muted', text: 'If that’s you, accept — the host will confirm.' })),
-      h('button', { class: 'btn primary slim', text: `I’m ${name} — accept`, on: { click: () => { void acceptOffer(); } } }));
+      h('strong', { text: `🎩 The host offered the table to ${name}.` }),
+      h('div', { class: 'small muted', text: 'Only the host can change buy-ins and chips. If that’s you, accept — the host will confirm.' }),
+      h('button', { class: 'btn primary slim', text: `I’m ${name.length > 18 ? `${name.slice(0, 17)}…` : name} — accept`, attrs: { 'aria-label': `I’m ${name} — accept` }, on: { click: () => { void acceptOffer(); } } }));
   }
 
   const leave = () => { history.replaceState(null, '', location.pathname); location.reload(); };

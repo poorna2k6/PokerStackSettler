@@ -288,3 +288,10 @@ input::placeholder { color: var(--muted); } input:focus { outline: none; color: 
 .handover .hands-h { margin-top: 10px; }
 .offer-card { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 14px; background: linear-gradient(135deg, rgba(232,197,91,.25), rgba(232,197,91,.08)); border: 1px solid rgba(232,197,91,.6); }
 .offer-card .btn { white-space: nowrap; }
+
+/* hand-over banners and sheets: realistic (and hostile) names must wrap, never push the page sideways */
+.offer-card { flex-direction: column; align-items: stretch; gap: 6px; min-width: 0; }
+.offer-card strong, .handover strong { overflow-wrap: anywhere; }
+.offer-card .btn { white-space: normal; overflow-wrap: anywhere; min-height: 44px; }
+.sheet .btn { white-space: normal; overflow-wrap: anywhere; }
+.handover .two { margin-bottom: 4px; } .handover .btn.danger { margin-top: 6px; }

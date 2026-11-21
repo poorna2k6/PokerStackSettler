@@ -125,21 +125,20 @@ export function openHandoverSheet() {
       if (pending && Date.now() >= pending.expiresAt) setPending(null);
     }, 1000);
 
-    function draw() {
+    let draw = () => {
       if (!pending) {
         const players = state.session.players;
         body.replaceChildren(
-          h('p', { class: 'muted', text: 'The new host takes over editing. You become a viewer, and everyone’s live link keeps working.' }),
+          h('p', { class: 'muted', text: 'The host is the only person who can change buy-ins and chips; everyone else just watches. Hand it over and you become a viewer — everyone’s live link keeps working.' }),
           h('h3', { class: 'hands-h', text: 'Hand to a player in the list' }),
           players.length === 0
             ? h('p', { class: 'muted small', text: 'No players yet.' })
             : group(...players.map(p => h('button', { class: 'row action', on: { click: () => void offerToSeat(p.id, p.name) } },
-                h('span', { class: 'grow', text: p.name }), h('span', { class: 'muted small', text: 'sends a request ›' })))),
-          h('p', { class: 'muted small', text: 'They see “Accept” on their live view (they need to be watching the link). You then confirm here.' }),
+                h('span', { class: 'grow', text: p.name }), h('span', { class: 'muted small', text: 'ask to take over ›' })))),
+          h('p', { class: 'muted small', text: 'They get an “Accept” button on the live link they’re watching. You then confirm here.' }),
           h('h3', { class: 'hands-h', text: 'Hand to someone new' }),
           h('button', { class: 'btn tinted block', text: '▦ Show QR code', on: { click: () => void offerByLink() } }),
-          h('p', { class: 'muted small', text: 'Works for anyone, even people not in the list. One use, 10 minutes.' }),
-          h('button', { class: 'btn plain block', text: 'Close', on: { click: close } }));
+          h('p', { class: 'muted small', text: 'Works for anyone, even people not in the list. One use, 10 minutes.' }));
         return;
       }
       const left = h('strong', { class: 'mono', text: fmtLeft(pending.expiresAt - Date.now()), attrs: { 'data-left': '' } });
@@ -148,7 +147,7 @@ export function openHandoverSheet() {
         const input = h('input', { attrs: { type: 'text', readonly: true, value: url, 'aria-label': 'One-time hand-over link', spellcheck: false }, on: { focus: () => input.select() } });
         input.value = url;
         body.replaceChildren(
-          h('p', { class: 'muted', text: 'Ask the new host to scan this with their camera, then tap “Become host”.' }),
+          h('p', { class: 'muted', text: 'Ask the new host to scan this with their camera (or send them the link), then tap “Become host”. This phone then becomes a viewer.' }),
           h('div', { class: 'qr-box' }, renderQr(url, 'QR code to take over this table')),
           h('p', { class: 'center muted small' }, 'Expires in ', left, ' · works once'),
           group(h('label', { class: 'row field' }, h('span', { text: 'Link' }), input)),
@@ -160,19 +159,26 @@ export function openHandoverSheet() {
       }
       if (pending.status === 'claimed') {
         body.replaceChildren(
-          h('p', { class: 'center' }, h('strong', { text: `${pending.name ?? 'A player'} accepted.` })),
+          h('p', { class: 'center', attrs: { 'aria-live': 'polite' } }, h('strong', { text: `${pending.name ?? 'A player'} accepted.` })),
           h('p', { class: 'muted', text: 'Make them the host? You’ll become a viewer and they can edit the table from their phone.' }),
           h('button', { class: 'btn primary block', text: `Make ${pending.name ?? 'them'} the host`, on: { click: () => { void decide(true); } } }),
           h('button', { class: 'btn plain block', text: 'Not now', on: { click: () => { void decide(false); } } }));
         return;
       }
       body.replaceChildren(
-        h('p', { class: 'center' }, h('strong', { text: `Waiting for ${pending.name ?? 'the player'} to accept…` })),
+        h('p', { class: 'center', attrs: { 'aria-live': 'polite' } }, h('strong', { text: `Waiting for ${pending.name ?? 'the player'} to accept…` })),
         h('p', { class: 'muted small center', text: 'They need to open the live link; they will see an Accept button there.' }),
         h('p', { class: 'center muted small' }, 'Expires in ', left),
         h('button', { class: 'btn danger block', text: 'Cancel request', on: { click: () => { void withdraw(); } } }),
-        h('button', { class: 'btn plain block', text: 'Close (keep waiting)', on: { click: close } }));
+        h('button', { class: 'btn plain block', text: 'Keep waiting', on: { click: close } }));
     }
+    const drawAndFocus = draw;
+    draw = () => {
+      drawAndFocus();
+      // keep keyboard focus inside the sheet after every redraw (the old controls were replaced)
+      // (deferred a frame: on the first draw the sheet is not attached to the page yet)
+      requestAnimationFrame(() => (body.querySelector('button.primary, button.danger, .row.action, input, button') as HTMLElement | null)?.focus({ preventScroll: true }));
+    };
     draw();
     return body;
   });

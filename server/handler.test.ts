@@ -300,15 +300,21 @@ describe('hand-over', () => {
       expect((await act(env.call, data.code, 'claim', 'POST', { body: { token: second.token, keyHash: hashOf(newKey) } })).status).toBe(404);
     });
 
-    it('throttles token guessing per code', async () => {
+    it('throttles only failed guesses, per IP: a bystander cannot lock the host out, a valid token always works', async () => {
       const env = setup();
       const { data } = await create(env.call);
-      await linkOffer(env, data);
+      const { token } = await linkOffer(env, data);
       let last = 0;
-      for (let i = 0; i < 70; i++) {
-        last = (await act(env.call, data.code, 'claim', 'POST', { body: { token: `guess${i}`, keyHash: hashOf(newKey) }, ip: `10.0.0.${i % 250}` })).status;
+      for (let i = 0; i < 60; i++) {
+        last = (await act(env.call, data.code, 'claim', 'POST', { body: { token: `guess${i}`, keyHash: hashOf(newKey) }, ip: '66.6.6.6' })).status;
       }
-      expect(last).toBe(429);
+      expect(last).toBe(429);                                   // the noisy IP is throttled...
+      for (let i = 0; i < 80; i++) {                             // ...and other people's noise does not consume anything shared
+        await act(env.call, data.code, 'claim', 'POST', { body: { token: `x${i}`, keyHash: hashOf(newKey) }, ip: `77.7.${i % 200}.1` });
+      }
+      // the host's real QR still works, from a fresh IP and even from the throttled one
+      const ok = await act(env.call, data.code, 'claim', 'POST', { body: { token, keyHash: hashOf(newKey) }, ip: '66.6.6.6' });
+      expect(ok.status).toBe(200);
     });
   });
 
@@ -379,6 +385,8 @@ describe('storage health and the unconfigured store', () => {
     get: async () => { throw new StorageNotConfigured(); },
     set: async () => { throw new StorageNotConfigured(); },
     del: async () => { throw new StorageNotConfigured(); },
+    setIf: async () => { throw new StorageNotConfigured(); },
+    delIf: async () => { throw new StorageNotConfigured(); },
     incr: async () => { throw new StorageNotConfigured(); }
   };
 
@@ -406,3 +414,81 @@ describe('storage health and the unconfigured store', () => {
     expect((await handleShare(req('GET', { query: { code }, ip: '8.1.1.2' }), b)).status).toBe(404);
   });
 });
+
+// ---------------------------------------------------------------------------------------------
+// Concurrency: the real production store has latency between read and write
+// ---------------------------------------------------------------------------------------------
+describe('atomic hand-over under concurrent requests', () => {
+  const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+  /** A store whose reads take a moment, like a network call, so concurrent requests interleave. */
+  function slow(inner: Store): Store {
+    return {
+      kind: inner.kind,
+      get: async k => { const v = await inner.get(k); await sleep(Math.random() * 6); return v; },
+      set: inner.set, del: inner.del, setIf: inner.setIf, delIf: inner.delIf, incr: inner.incr
+    };
+  }
+  const mk = () => {
+    const inner = memoryStore();
+    const store = slow(inner);
+    const call = (r: ApiRequest) => handleShare(r, store, Date.now());
+    return { call };
+  };
+  const key2 = 'm'.repeat(32);
+
+  it('two phones using the same QR at the same moment: exactly one wins and exactly one key is valid', async () => {
+    for (let round = 0; round < 15; round++) {
+      const { call } = mk();
+      ip++;
+      const made = (await call(req('POST', { body: { snapshot: snap() } }))).body as { code: string; hostKey: string };
+      const off = (await call(req('POST', { query: { code: made.code, action: 'offer' }, headers: { 'x-host-key': made.hostKey }, body: { kind: 'link' } }))).body as { token: string };
+      const [a, b] = await Promise.all([
+        call(req('POST', { query: { code: made.code, action: 'claim' }, body: { token: off.token, keyHash: hashOf(newKeyA) }, ip: '1.2.3.4' })),
+        call(req('POST', { query: { code: made.code, action: 'claim' }, body: { token: off.token, keyHash: hashOf(key2) }, ip: '1.2.3.5' }))
+      ]);
+      const wins = [a.status, b.status].filter(x => x === 200).length;
+      expect(wins).toBe(1);
+      const valid = async (k: string) => (await call(req('POST', { query: { code: made.code, action: 'verify' }, headers: { 'x-host-key': k } }))).status === 200;
+      const states = [await valid(made.hostKey), await valid(newKeyA), await valid(key2)];
+      expect(states.filter(Boolean).length).toBe(1);
+      expect(states[0]).toBe(false); // the old host is out
+      expect(states[a.status === 200 ? 1 : 2]).toBe(true);
+    }
+  });
+
+  it('a stale save from the old host racing a hand-over can never bring the old key back', async () => {
+    for (let round = 0; round < 20; round++) {
+      const { call } = mk();
+      ip++;
+      const made = (await call(req('POST', { body: { snapshot: snap() } }))).body as { code: string; hostKey: string };
+      const off = (await call(req('POST', { query: { code: made.code, action: 'offer' }, headers: { 'x-host-key': made.hostKey }, body: { kind: 'link' } }))).body as { token: string };
+      const [put, claim] = await Promise.all([
+        call(req('PUT', { query: { code: made.code }, headers: { 'x-host-key': made.hostKey }, body: { snapshot: snap({ name: `edit${round}` }) } })),
+        call(req('POST', { query: { code: made.code, action: 'claim' }, body: { token: off.token, keyHash: hashOf(newKeyA) }, ip: '2.2.2.2' }))
+      ]);
+      expect(claim.status).toBe(200);
+      const verify = async (k: string) => (await call(req('POST', { query: { code: made.code, action: 'verify' }, headers: { 'x-host-key': k } }))).status;
+      expect(await verify(newKeyA)).toBe(200);  // the new host really is host (used to fail ~15% of the time)
+      expect(await verify(made.hostKey)).toBe(403);
+      expect([200, 403]).toContain(put.status);
+    }
+  });
+
+  it('host stopping the table while a claim lands cannot leave a half-deleted table', async () => {
+    for (let round = 0; round < 10; round++) {
+      const { call } = mk();
+      ip++;
+      const made = (await call(req('POST', { body: { snapshot: snap() } }))).body as { code: string; hostKey: string };
+      const off = (await call(req('POST', { query: { code: made.code, action: 'offer' }, headers: { 'x-host-key': made.hostKey }, body: { kind: 'link' } }))).body as { token: string };
+      const [del, claim] = await Promise.all([
+        call(req('DELETE', { query: { code: made.code }, headers: { 'x-host-key': made.hostKey } })),
+        call(req('POST', { query: { code: made.code, action: 'claim' }, body: { token: off.token, keyHash: hashOf(newKeyA) }, ip: '3.3.3.3' }))
+      ]);
+      const view = await call(req('GET', { query: { code: made.code }, ip: '4.4.4.4' }));
+      if (del.status === 200) expect(view.status).toBe(404);           // stopped means stopped
+      else expect(view.status).toBe(200);                                // the claim won, the old host's stop was refused
+      expect([200, 403, 404]).toContain(claim.status);
+    }
+  });
+});
+const newKeyA = 'a'.repeat(32);
