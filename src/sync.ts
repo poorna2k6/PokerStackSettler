@@ -11,7 +11,8 @@ const RETRY_MS = 15000;
 
 export type SyncPhase = 'off' | 'syncing' | 'ok' | 'offline' | 'unavailable' | 'expired';
 /** expiresAt: when the server will drop the link if the host makes no further change (ms since epoch). */
-export const sync: { phase: SyncPhase; at: string; expiresAt?: number } = { phase: 'off', at: '' };
+export const sync: { phase: SyncPhase; at: string; expiresAt?: number; ttl?: number } = { phase: 'off', at: '' };
+let wantTtl: number | undefined; // a new lifetime the host picked, sent with the next save
 let lastOkAt = 0;
 let missCount = 0;
 
@@ -65,14 +66,15 @@ export function handedOver(code: string, who?: string) {
 
 export const shareUrl = (code: string) => `${location.origin}${location.pathname}#/v/${code}`;
 
-export async function startSharing(): Promise<string | null> {
+export async function startSharing(ttlSeconds?: number): Promise<string | null> {
   if (state.session.isDemo) return 'Demo data can’t be shared — start a fresh session first.';
   try {
-    const r = await call<{ code: string; hostKey: string; error?: string; reason?: string; expiresAt?: number }>('POST', '', { snapshot: shareSnapshot() });
+    const r = await call<{ code: string; hostKey: string; error?: string; reason?: string; expiresAt?: number; ttl?: number }>('POST', '', { snapshot: shareSnapshot(), ttlSeconds });
     if (r.status === 503 && r.data?.reason === 'storage_not_configured') return 'Live sharing isn’t set up on this server yet (its storage is not connected). See the README, section “Deploying on Vercel”.';
     if (r.status !== 201 || !normalizeCode(r.data?.code)) return r.data?.error ?? 'Could not start sharing. Check your connection and try again.';
     setShare({ code: r.data.code, hostKey: r.data.hostKey });
     sync.expiresAt = r.data.expiresAt;
+    sync.ttl = r.data.ttl;
     lastOkAt = Date.now();
     missCount = 0;
     setPhase('ok', clock());
@@ -80,6 +82,15 @@ export async function startSharing(): Promise<string | null> {
   } catch {
     return 'Could not reach the server. Check your connection and try again.';
   }
+}
+
+/** Changes how long the link stays valid after the host's last change; applied with the next save (sent now). */
+export function setShareTtl(seconds: number) {
+  if (!state.session.share) return;
+  wantTtl = seconds;
+  sync.ttl = seconds;
+  dirty = true;
+  void flush();
 }
 
 /** Stops the link for everyone. Returns false if the server could not be told (the link then expires on its own). */
@@ -150,11 +161,14 @@ async function flush() {
   dirty = false;
   inFlight = true;
   try {
-    const r = await call<{ expiresAt?: number; reason?: string }>('PUT', `?code=${share.code}`, { snapshot: shareSnapshot() }, share.hostKey);
+    const sending = wantTtl;
+    const r = await call<{ expiresAt?: number; ttl?: number; reason?: string }>('PUT', `?code=${share.code}`, { snapshot: shareSnapshot(), ttlSeconds: sending }, share.hostKey);
     if (r.status === 200) {
       missCount = 0;
       lastOkAt = Date.now();
       if (r.data?.expiresAt) sync.expiresAt = r.data.expiresAt;
+      if (r.data?.ttl) sync.ttl = r.data.ttl;
+      if (sending !== undefined && wantTtl === sending) wantTtl = undefined;
       setPhase('ok', clock());
     } else if (r.status === 503) {
       // the server has no storage: keep the key, say so, and try again slowly

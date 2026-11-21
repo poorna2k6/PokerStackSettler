@@ -1,11 +1,11 @@
 import { h, haptic, openSheet, confirmSheet, setFocusFallback, toast } from './dom';
 import { clink, setSoundEnabled } from './sound';
 import { MAX_SEATS, avatar, chipStack, group, header, kpi, ovalTable } from './ui';
-import { formatCode, normalizeCode } from './shared';
+import { SHARE_TTL_CHOICES, SHARE_TTL_SECONDS, formatCode, normalizeCode } from './shared';
 import { openHandsSheet } from './hands';
 import { openHandoverSheet } from './handover';
 import { drawSettlement, sharePicture } from './picture';
-import { shareUrl, startSharing, stopSharing, sync } from './sync';
+import { setShareTtl, shareUrl, startSharing, stopSharing, sync } from './sync';
 import {
   buildReceipt, formatBuyInCount, formatUnit, parseBackup, MAX_UNIT, MIN_UNIT, type Audit, formatCurrency, leaderboard, toCents, unitCentsFor,
   type SavedSession
@@ -76,6 +76,7 @@ function startFresh() {
   openAddPlayer();
 }
 
+const ttlLabel = (sec?: number) => (SHARE_TTL_CHOICES.find(c => c.seconds === (sec ?? SHARE_TTL_SECONDS))?.label ?? '7 days').replace(/ \(.*$/, '').replace('Until I stop it', '90 days');
 const LINK_NOTE = '\n\nThis also stops your live view-only link.';
 
 function requestNew() {
@@ -212,16 +213,19 @@ function openShareSheet() {
     let draw = () => {
       const share = state.session.share;
       if (!share) {
+        const pick = h('select', { attrs: { 'aria-label': 'How long the link stays valid' } },
+          ...SHARE_TTL_CHOICES.map(c => h('option', { text: c.label, attrs: { value: c.seconds, selected: c.seconds === SHARE_TTL_SECONDS } })));
         const start = h('button', { class: 'btn primary block', text: 'Start sharing', on: { click: async () => {
           start.disabled = true;
           start.textContent = 'Starting…';
-          const msg = await startSharing();
+          const msg = await startSharing(Number(pick.value));
           if (msg) toast(msg, 'error');
           draw();
         } } });
         body.replaceChildren(
           h('p', { class: 'muted', text: 'Let everyone at the table watch live: each player’s buy-ins, chips and who pays whom. They get a link to a view-only page — only you can make changes.' }),
-          h('p', { class: 'muted small', text: 'Names and amounts are stored on a server and deleted 7 days after your last change (every edit starts the 7 days again). You can stop sharing at any time.' }),
+          group(h('label', { class: 'row field' }, h('span', { text: 'Link stays valid for' }), pick)),
+          h('p', { class: 'muted small', text: 'Names and amounts are stored on a server and deleted after that time counted from your last change (every edit starts it again). You can stop sharing at any time.' }),
           ...(state.session.isDemo ? [h('p', { class: 'bad small', text: 'This is demo data — start a fresh session to share a real game.' })] : []),
           state.session.isDemo ? Object.assign(start, { disabled: true }) : start,
           h('button', { class: 'btn plain block', text: 'Not now', on: { click: close } }));
@@ -243,7 +247,10 @@ function openShareSheet() {
           h('button', { class: 'btn tinted', text: 'Copy link', on: { click: () => copyText(url) } }),
           h('button', { class: 'btn tinted', text: 'Copy code', on: { click: () => copyText(formatCode(share.code)) } })),
         statusEl,
-        h('p', { class: 'muted small', text: `Viewers can’t edit anything. ${sync.expiresAt ? `The link is valid until ${new Date(sync.expiresAt).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })} and` : 'The link'} stays valid for 7 days after your last change (every edit extends it), or until you stop sharing.` }),
+        h('p', { class: 'muted small', text: `Viewers can’t edit anything. ${sync.expiresAt ? `The link is valid until ${new Date(sync.expiresAt).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })}; ` : ''}every change you make starts the ${ttlLabel(sync.ttl)} again, or until you stop sharing.` }),
+        group(h('label', { class: 'row field' }, h('span', { text: 'Valid for' }),
+          h('select', { attrs: { 'aria-label': 'How long the link stays valid' }, on: { change: e => { setShareTtl(Number((e.target as HTMLSelectElement).value)); toast('Link lifetime updated'); } } },
+            ...SHARE_TTL_CHOICES.map(c => h('option', { text: c.label, attrs: { value: c.seconds, selected: c.seconds === (sync.ttl ?? SHARE_TTL_SECONDS) } }))))),
         h('button', { class: 'btn tinted block', text: '🎩 Hand over the table', on: { click: () => { close(); openHandoverSheet(); } } }),
         h('button', { class: 'btn danger block', text: 'Stop sharing', on: { click: () => { close(); confirmSheet({
           title: 'Stop sharing?', message: 'The link and code stop working immediately for everyone watching.',

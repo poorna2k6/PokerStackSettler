@@ -71,6 +71,13 @@ var CODE_LENGTH = 8;
 var OFFER_TTL_MS = 10 * 60 * 1e3;
 var KEY_HASH_RE = /^[a-f0-9]{64}$/;
 var SHARE_TTL_SECONDS = 7 * 24 * 60 * 60;
+var SHARE_TTL_CHOICES = [
+  { seconds: 24 * 3600, label: "24 hours" },
+  { seconds: 7 * 24 * 3600, label: "7 days" },
+  { seconds: 30 * 24 * 3600, label: "30 days" },
+  { seconds: 90 * 24 * 3600, label: "Until I stop it (90-day safety limit)" }
+];
+var pickTtl = (raw, fallback = SHARE_TTL_SECONDS) => SHARE_TTL_CHOICES.some((c) => c.seconds === raw) ? raw : fallback;
 function normalizeCode(raw) {
   const code = String(raw ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
   if (code.length !== CODE_LENGTH) return null;
@@ -99,6 +106,7 @@ var StorageNotConfigured = class extends Error {
     this.name = "StorageNotConfigured";
   }
 };
+var ttlOf = (rec) => pickTtl(rec?.ttl);
 var MAX_BODY_BYTES = 32 * 1024;
 var LIMITS = {
   create: { max: 10, window: 3600 },
@@ -165,8 +173,9 @@ async function mutate(store, code, now, fn) {
       continue;
     }
     if (!step.next) return step.res;
-    step.next.expiresAt = now + SHARE_TTL_SECONDS * 1e3;
-    if (await store.setIf(key, JSON.stringify(step.next), SHARE_TTL_SECONDS, raw)) return step.res;
+    const ttl = ttlOf(step.next);
+    step.next.expiresAt = now + ttl * 1e3;
+    if (await store.setIf(key, JSON.stringify(step.next), ttl, raw)) return step.res;
   }
   return err(409, "The table is busy \u2014 try again");
 }
@@ -189,11 +198,12 @@ async function handleShare(req, store, now = Date.now(), limits = LIMITS) {
       const snapshot = sanitizeSnapshot(req.body?.snapshot, now);
       if (!snapshot) return err(400, "Invalid session");
       const hostKey = randomBytes(24).toString("base64url");
-      const rec = { keyHash: sha256(hostKey), snapshot, rev: 1, createdAt: now, epoch: 1, expiresAt: now + SHARE_TTL_SECONDS * 1e3 };
+      const ttl = pickTtl(req.body?.ttlSeconds);
+      const rec = { keyHash: sha256(hostKey), snapshot, rev: 1, createdAt: now, epoch: 1, ttl, expiresAt: now + ttl * 1e3 };
       for (let i = 0; i < 5; i++) {
         const code2 = newCode();
-        if (await store.setIf(`share:${code2}`, JSON.stringify(rec), SHARE_TTL_SECONDS, null)) {
-          return json(201, { code: code2, hostKey, rev: 1, epoch: 1, expiresAt: rec.expiresAt });
+        if (await store.setIf(`share:${code2}`, JSON.stringify(rec), ttl, null)) {
+          return json(201, { code: code2, hostKey, rev: 1, epoch: 1, ttl, expiresAt: rec.expiresAt });
         }
       }
       return err(500, "Could not allocate a code");
@@ -220,7 +230,8 @@ async function handleShare(req, store, now = Date.now(), limits = LIMITS) {
         rev: rec.rev,
         epoch: rec.epoch ?? 1,
         offer: publicOffer(rec, now),
-        expiresAt: rec.expiresAt ?? rec.snapshot.updatedAt + SHARE_TTL_SECONDS * 1e3
+        ttl: ttlOf(rec),
+        expiresAt: rec.expiresAt ?? rec.snapshot.updatedAt + ttlOf(rec) * 1e3
       });
     }
     if (method === "PUT" || method === "DELETE") {
@@ -233,7 +244,8 @@ async function handleShare(req, store, now = Date.now(), limits = LIMITS) {
           if (!rec) return { res: await gone(store, code) };
           if (!keyMatches(hostKey, rec.keyHash)) return { res: err(403, "Only the host can change this table") };
           const next = { ...rec, snapshot, rev: rec.rev + 1 };
-          return { next, res: json(200, { rev: next.rev, epoch: next.epoch ?? 1, expiresAt: now + SHARE_TTL_SECONDS * 1e3 }) };
+          next.ttl = pickTtl(req.body?.ttlSeconds, ttlOf(rec));
+          return { next, res: json(200, { rev: next.rev, epoch: next.epoch ?? 1, ttl: next.ttl, expiresAt: now + next.ttl * 1e3 }) };
         });
       }
       return mutate(store, code, now, async (rec) => {

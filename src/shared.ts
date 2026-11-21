@@ -27,6 +27,16 @@ export const OFFER_TTL_MS = 10 * 60 * 1000;
 export const KEY_HASH_RE = /^[a-f0-9]{64}$/;
 
 export const SHARE_TTL_SECONDS = 7 * 24 * 60 * 60;
+/** What the host may pick. Every choice is a rolling lifetime counted from the host's last change. */
+export const SHARE_TTL_CHOICES: { seconds: number; label: string }[] = [
+  { seconds: 24 * 3600, label: '24 hours' },
+  { seconds: 7 * 24 * 3600, label: '7 days' },
+  { seconds: 30 * 24 * 3600, label: '30 days' },
+  { seconds: 90 * 24 * 3600, label: 'Until I stop it (90-day safety limit)' }
+];
+/** Only a listed lifetime is accepted from a client; anything else falls back to `fallback`. */
+export const pickTtl = (raw: unknown, fallback = SHARE_TTL_SECONDS) =>
+  SHARE_TTL_CHOICES.some(c => c.seconds === raw) ? (raw as number) : fallback;
 
 export function normalizeCode(raw: unknown): string | null {
   const code = String(raw ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');

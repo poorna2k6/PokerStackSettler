@@ -2,7 +2,7 @@
 // middleware and the unit tests all call this, so the permission rules live in exactly one place.
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import {
-  CODE_ALPHABET, CODE_LENGTH, KEY_HASH_RE, OFFER_TTL_MS, SHARE_TTL_SECONDS, normalizeCode, sanitizeSnapshot,
+  CODE_ALPHABET, CODE_LENGTH, KEY_HASH_RE, OFFER_TTL_MS, SHARE_TTL_SECONDS, normalizeCode, pickTtl, sanitizeSnapshot,
   type PublicOffer, type SharedSnapshot
 } from '../src/shared';
 
@@ -52,8 +52,12 @@ interface Record_ {
   epoch?: number;
   /** when the store will drop this record (ms since epoch); refreshed by every write */
   expiresAt?: number;
+  /** the host's chosen rolling lifetime in seconds (missing on old records = 7 days) */
+  ttl?: number;
   offer?: Offer;
 }
+
+const ttlOf = (rec: { ttl?: number } | null | undefined) => pickTtl(rec?.ttl);
 
 export const MAX_BODY_BYTES = 32 * 1024;
 export const LIMITS = {
@@ -128,8 +132,9 @@ async function mutate(
       continue;
     }
     if (!step.next) return step.res;
-    step.next.expiresAt = now + SHARE_TTL_SECONDS * 1000;
-    if (await store.setIf(key, JSON.stringify(step.next), SHARE_TTL_SECONDS, raw)) return step.res;
+    const ttl = ttlOf(step.next);
+    step.next.expiresAt = now + ttl * 1000;
+    if (await store.setIf(key, JSON.stringify(step.next), ttl, raw)) return step.res;
   }
   return err(409, 'The table is busy — try again');
 }
@@ -159,11 +164,12 @@ export async function handleShare(req: ApiRequest, store: Store, now = Date.now(
       const snapshot = sanitizeSnapshot((req.body as { snapshot?: unknown } | null)?.snapshot, now);
       if (!snapshot) return err(400, 'Invalid session');
       const hostKey = randomBytes(24).toString('base64url');
-      const rec: Record_ = { keyHash: sha256(hostKey), snapshot, rev: 1, createdAt: now, epoch: 1, expiresAt: now + SHARE_TTL_SECONDS * 1000 };
+      const ttl = pickTtl((req.body as { ttlSeconds?: unknown } | null)?.ttlSeconds);
+      const rec: Record_ = { keyHash: sha256(hostKey), snapshot, rev: 1, createdAt: now, epoch: 1, ttl, expiresAt: now + ttl * 1000 };
       for (let i = 0; i < 5; i++) {
         const code = newCode();
-        if (await store.setIf(`share:${code}`, JSON.stringify(rec), SHARE_TTL_SECONDS, null)) {
-          return json(201, { code, hostKey, rev: 1, epoch: 1, expiresAt: rec.expiresAt });
+        if (await store.setIf(`share:${code}`, JSON.stringify(rec), ttl, null)) {
+          return json(201, { code, hostKey, rev: 1, epoch: 1, ttl, expiresAt: rec.expiresAt });
         }
       }
       return err(500, 'Could not allocate a code');
@@ -193,7 +199,7 @@ export async function handleShare(req: ApiRequest, store: Store, now = Date.now(
       // The host key hash never leaves the server.
       return json(200, {
         snapshot: rec.snapshot, rev: rec.rev, epoch: rec.epoch ?? 1, offer: publicOffer(rec, now),
-        expiresAt: rec.expiresAt ?? rec.snapshot.updatedAt + SHARE_TTL_SECONDS * 1000
+        ttl: ttlOf(rec), expiresAt: rec.expiresAt ?? rec.snapshot.updatedAt + ttlOf(rec) * 1000
       });
     }
 
@@ -207,7 +213,9 @@ export async function handleShare(req: ApiRequest, store: Store, now = Date.now(
           if (!rec) return { res: await gone(store, code) };
           if (!keyMatches(hostKey, rec.keyHash)) return { res: err(403, 'Only the host can change this table') };
           const next: Record_ = { ...rec, snapshot, rev: rec.rev + 1 };
-          return { next, res: json(200, { rev: next.rev, epoch: next.epoch ?? 1, expiresAt: now + SHARE_TTL_SECONDS * 1000 }) };
+          // The host may change the lifetime later ("Extend"); only a listed value counts, otherwise it is kept.
+          next.ttl = pickTtl((req.body as { ttlSeconds?: unknown } | null)?.ttlSeconds, ttlOf(rec));
+          return { next, res: json(200, { rev: next.rev, epoch: next.epoch ?? 1, ttl: next.ttl, expiresAt: now + next.ttl * 1000 }) };
         });
       }
       return mutate(store, code, now, async rec => {
