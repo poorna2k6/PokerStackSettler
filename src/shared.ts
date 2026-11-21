@@ -1,5 +1,5 @@
 // Types and validation shared by the app (host + viewer) and the /api/share function.
-import { sanitizeBuyIn, sanitizePaid, sanitizePlayers, safeCents, type Player } from './engine';
+import { sanitizeBills, sanitizeBuyIn, sanitizePaid, sanitizePlayers, safeCents, type Bill, type Player } from './engine';
 
 export interface SharedSnapshot {
   name: string;
@@ -8,6 +8,7 @@ export interface SharedSnapshot {
   isEnded: boolean;
   players: Player[];
   paid: Record<string, boolean>;
+  bills?: Bill[];
   /** set by the server on every write */
   updatedAt: number;
 }
@@ -59,6 +60,7 @@ export function sanitizeSnapshot(raw: unknown, now = Date.now()): SharedSnapshot
     isEnded: o.isEnded === true,
     players: sanitizePlayers(o.players),
     paid: sanitizePaid(o.paid),
+    bills: sanitizeBills(o.bills),
     updatedAt: now
   };
 }

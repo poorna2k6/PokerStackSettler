@@ -3,6 +3,7 @@ import { clink, setSoundEnabled } from './sound';
 import { MAX_SEATS, avatar, chipStack, group, header, kpi, ovalTable } from './ui';
 import { SHARE_TTL_CHOICES, SHARE_TTL_SECONDS, formatCode, normalizeCode } from './shared';
 import { openHandsSheet } from './hands';
+import { askExtraExpenses, openExpenses, previewLines } from './expenses';
 import { openHandoverSheet } from './handover';
 import { drawSettlement, sharePicture } from './picture';
 import { setShareTtl, shareUrl, startSharing, stopSharing, sync } from './sync';
@@ -122,7 +123,8 @@ function tableView(): HTMLElement {
     view.append(group(h('div', { class: 'row banner info' },
       h('span', { text: '🔒 Session settled and locked' }),
       h('button', { class: 'link', text: 'Reopen', on: { click: () => confirmSheet({
-        title: 'Reopen session?', message: 'Editing will be enabled again. You can settle it again afterwards.',
+        title: 'Reopen session?',
+        message: `Editing will be enabled again. You can settle it again afterwards.${Object.keys(state.session.paid).length ? '\n\nChanging chips or expenses changes who pays whom, so the “paid” ticks will start again.' : ''}`,
         confirmLabel: 'Reopen', onConfirm: reopenSession }) } }))));
   } else if (!a.isBalanced && a.players.length > 0) {
     const over = a.discrepancyCents > 0;
@@ -165,8 +167,12 @@ function tableView(): HTMLElement {
   view.append(group(
     field('Name', textInput(s.name, setName, { disabled: locked, label: 'Session name' })),
     field('Buy-in unit ($)', textInput(String(s.defaultBuyIn), changeUnit, { disabled: locked, mode: 'decimal', label: 'Buy-in unit' })),
-    field('Rake ($)', textInput(money(s.expenseCents), setExpense, { disabled: locked, mode: 'decimal', label: 'Expense pot' }))
+    field('Rake / house cut ($)', textInput(money(s.expenseCents), setExpense, { disabled: locked, mode: 'decimal', label: 'Rake or house cut' })),
+    h('button', { class: 'row action', attrs: { 'aria-label': `Extra expenses, ${a.billsTotalCents ? formatCurrency(a.billsTotalCents) : 'none'}` }, on: { click: () => openExpenses() } },
+      h('span', { class: 'grow', text: 'Extra expenses (food, drinks…)' }),
+      h('span', { class: 'muted mono', text: a.billsTotalCents ? formatCurrency(a.billsTotalCents) : 'None' }), h('span', { class: 'muted', text: '›' }))
   ));
+  view.append(h('div', { class: 'foot', text: 'Rake is chips the house keeps. Food and drinks go under Extra expenses so nobody enters them twice.' }));
 
   view.append(
     h('button', {
@@ -465,19 +471,26 @@ function finishSession() {
 }
 
 function requestEnd() {
+  const a0 = audit();
+  if (a0.players.length < 2) { toast('Add at least 2 players to settle', 'error'); return; }
+  if (a0.billsTotalCents === 0 && !state.session.isEnded) { askExtraExpenses(confirmEnd); return; }
+  confirmEnd();
+}
+
+function confirmEnd() {
   const a = audit();
-  if (a.players.length < 2) { toast('Add at least 2 players to settle', 'error'); return; }
+  if (a.players.length < 2) return;
   if (!a.isBalanced) {
     confirmSheet({
       title: `Chips are ${formatCurrency(Math.abs(a.discrepancyCents))} ${a.discrepancyCents < 0 ? 'short' : 'over'}`,
-      message: `${a.totalPlayerCashOutCents === 0 ? 'No ending chips have been entered yet.\n\n' : ''}Ending chips (${formatCurrency(a.totalAccountedCents)}) don't match buy-ins (${formatCurrency(a.totalBuyInCents)}).\n\nContinuing will adjust payouts so the table balances (pro-rata among winners, or equally if nobody is ahead), then lock the session.`,
+      message: `${previewLines()}${a.totalPlayerCashOutCents === 0 ? 'No ending chips have been entered yet.\n\n' : ''}Ending chips (${formatCurrency(a.totalAccountedCents)}) don't match buy-ins (${formatCurrency(a.totalBuyInCents)}).\n\nContinuing will adjust payouts so the table balances (pro-rata among winners, or equally if nobody is ahead), then lock the session.`,
       confirmLabel: 'Balance & settle', onConfirm: finishSession
     });
     return;
   }
   confirmSheet({
     title: 'End & settle?',
-    message: `${a.players.length} players · ${formatCurrency(a.totalBuyInCents)} pot · ${a.transfers.length} transfer${a.transfers.length === 1 ? '' : 's'}.\n\n${state.session.isDemo ? 'This is demo data, so it won’t be saved to History. The session will be locked.' : 'The session will be saved to History and locked.'}`,
+    message: `${previewLines()}${a.players.length} players · ${formatCurrency(a.totalBuyInCents)} pot · ${a.transfers.length} transfer${a.transfers.length === 1 ? '' : 's'}.\n\n${state.session.isDemo ? 'This is demo data, so it won’t be saved to History. The session will be locked.' : 'The session will be saved to History and locked.'}`,
     confirmLabel: 'End session', onConfirm: finishSession
   });
 }
@@ -524,13 +537,24 @@ function settleView(): HTMLElement {
     })));
   }
 
-  view.append(header('Standings'));
+  view.append(header('Standings', a.billsTotalCents ? 'poker → after food' : ''));
   const sorted = [...a.players].sort((x, y) => y.netCents - x.netCents);
+  const hasBills = a.billsTotalCents > 0;
   view.append(group(...sorted.map((p, i) => h('div', { class: `row standing ${i === 0 && p.netCents > 0 ? 'gold' : ''}` },
     h('span', { class: 'rank', text: i === 0 && p.netCents > 0 ? '🏆' : String(i + 1) }),
     h('span', { class: 'grow', text: p.name }),
     h('span', { class: 'muted mono', text: formatBuyInCount(p.buyInCount) }),
-    h('span', { class: `mono ${p.netCents > 0 ? 'good' : p.netCents < 0 ? 'bad' : 'muted'}`, text: formatCurrency(p.netCents, true) })))));
+    h('span', { class: `mono ${p.netCents > 0 ? 'good' : p.netCents < 0 ? 'bad' : 'muted'}`, text: formatCurrency(p.netCents, true) }),
+    ...(hasBills ? [h('span', { class: `mono ${p.finalCents > 0 ? 'good' : p.finalCents < 0 ? 'bad' : 'muted'}`, text: `→ ${formatCurrency(p.finalCents, true)}` })] : [])))));
+  if (a.guests.length) {
+    view.append(header('Not playing'));
+    view.append(group(...a.guests.map(g => h('div', { class: 'row standing' },
+      h('span', { class: 'rank', text: '🍕' }), h('span', { class: 'grow', text: g.name }),
+      h('span', { class: `mono ${g.finalCents > 0 ? 'good' : 'muted'}`, text: formatCurrency(g.finalCents, true) })))));
+  }
+  view.append(group(h('button', { class: 'row action', on: { click: () => openExpenses() } },
+    h('span', { class: 'grow', text: 'Extra expenses (food, drinks…)' }),
+    h('span', { class: 'muted mono', text: hasBills ? formatCurrency(a.billsTotalCents) : s.isEnded ? 'None' : 'Add' }), h('span', { class: 'muted', text: '›' }))));
 
   const receipt = () => buildReceipt(s.name, a, s.paid);
   if (a.players.length === 0) return view;

@@ -1,5 +1,5 @@
 import { normalizeCode } from './shared';
-import { sanitizeBuyIn, sanitizePaid, sanitizePlayers, sanitizeSaved, toCents, uniqueSessionIds, type SavedSession, type SessionData } from './engine';
+import { sanitizeBills, sanitizeBuyIn, sanitizePaid, sanitizePlayers, sanitizeSaved, toCents, uniqueSessionIds, type SavedSession, type SessionData } from './engine';
 
 const VAULT_KEY = 'stacksettle_pro_vault_v2';
 const LIVE_KEY = 'stacksettle_live_autosave_v1';
@@ -61,14 +61,15 @@ export function loadLive(): SessionData | null {
     isDemo: o.isDemo === true,
     share: parseShare(o.share),
     players,
-    paid
+    paid,
+    bills: sanitizeBills(o.bills)
   };
 }
 
 export const saveLive = (s: SessionData) =>
   write(LIVE_KEY, {
     id: s.id, name: s.name, defaultBuyIn: s.defaultBuyIn, expenseCents: s.expenseCents,
-    isEnded: s.isEnded, isDemo: s.isDemo === true, share: s.share, players: s.players, paid: s.paid
+    isEnded: s.isEnded, isDemo: s.isDemo === true, share: s.share, players: s.players, paid: s.paid, bills: s.bills ?? []
   });
 
 export function loadVault(): SavedSession[] {

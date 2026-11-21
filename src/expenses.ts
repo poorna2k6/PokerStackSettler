@@ -1,0 +1,121 @@
+// "Extra expenses" (food, drinks…): the list, the add/edit form and the End & settle question.
+import { h, haptic, openSheet, confirmSheet, toast } from './dom';
+import { formatCurrency, toCents, MAX_BILLS } from './engine';
+import { audit, checkBill, removeBill, saveBill, state, subscribe } from './state';
+import { group } from './ui';
+
+const payerName = (b: { payerId?: string; guest?: string }) =>
+  (b.payerId && state.session.players.find(p => p.id === b.payerId)?.name) || b.guest || 'Someone else';
+
+/** The list of expenses. `onDone` runs after the person taps Done (used by the End & settle flow). */
+export function openExpenses(onDone?: () => void) {
+  openSheet('Extra expenses', close => {
+    const body = h('div', { class: 'sheet-body' });
+    const stop = subscribe(() => { if (!body.isConnected) stop(); else draw(); });
+    const draw = () => {
+      const s = state.session;
+      const bills = s.bills ?? [];
+      const locked = s.isEnded;
+      const a = audit();
+      body.replaceChildren(
+        h('p', { class: 'muted small', text: 'Food, drinks or anything else paid by a player — or by someone who isn’t playing. The total is split equally between all players and added to who pays whom. Chips and poker results are not changed.' }),
+        bills.length === 0
+          ? group(h('div', { class: 'row empty' }, h('span', { text: 'No extra expenses yet.' })))
+          : group(
+            ...bills.map(b => h('button', {
+              class: 'row action', attrs: { 'data-fk': `bill:${b.id}`, 'aria-label': `${b.label}, ${formatCurrency(b.cents)}, paid by ${payerName(b)}${locked ? '' : ', edit'}`, disabled: locked },
+              on: { click: () => openBillForm(b.id) }
+            },
+              h('span', { class: 'grow' }, h('strong', { text: b.label }), h('div', { class: 'muted small', text: `paid by ${payerName(b)}` })),
+              h('span', { class: 'mono', text: formatCurrency(b.cents) }))),
+            h('div', { class: 'row' },
+              h('span', { class: 'muted grow', text: `Total · ${formatCurrency(a.players.length ? Math.floor(a.billsTotalCents / a.players.length) : 0)}+ each` }),
+              h('strong', { class: 'mono', text: formatCurrency(a.billsTotalCents) }))),
+        ...(locked ? [h('p', { class: 'muted small', text: 'The session is settled and locked. Reopen it on the Table tab to change expenses.' })] : [h('button', { class: 'btn tinted block', text: '＋ Add expense', attrs: { disabled: bills.length >= MAX_BILLS }, on: { click: () => openBillForm() } })]),
+        h('button', { class: `btn ${onDone ? 'primary' : 'plain'} block`, text: onDone ? 'Continue' : 'Done', on: { click: () => { close(); onDone?.(); } } }));
+    };
+    draw();
+    return body;
+  });
+}
+
+function openBillForm(id?: string) {
+  const s = state.session;
+  const existing = id ? (s.bills ?? []).find(b => b.id === id) : undefined;
+  if (id && !existing) return;
+  openSheet(existing ? 'Edit expense' : 'Add expense', close => {
+    const label = h('input', { attrs: { type: 'text', placeholder: 'Pizza, drinks…', maxlength: 40, autocomplete: 'off', 'aria-label': 'What was it for', value: existing?.label ?? '' } });
+    const amount = h('input', { attrs: { type: 'text', inputmode: 'decimal', placeholder: '0.00', autocomplete: 'off', 'aria-label': 'Amount in dollars', value: existing ? (existing.cents / 100).toFixed(2) : '' } });
+    label.value = existing?.label ?? '';
+    amount.value = existing ? (existing.cents / 100).toFixed(2) : '';
+    let payerId: string | undefined = existing?.payerId;
+    let someoneElse = !!existing && !existing.payerId;
+    const guest = h('input', { attrs: { type: 'text', placeholder: 'Name of the person who paid', maxlength: 40, autocomplete: 'off', 'aria-label': 'Name of the person who paid' } });
+    guest.value = existing?.guest ?? '';
+    const error = h('p', { class: 'bad small', attrs: { role: 'alert' } });
+    const chips = h('div', { class: 'seg-row wrap', attrs: { role: 'radiogroup', 'aria-label': 'Who paid' } });
+    const guestRow = h('label', { class: 'row field' }, h('span', { text: 'Name' }), guest);
+    const drawChips = () => {
+      chips.replaceChildren(
+        ...s.players.map(p => h('button', {
+          class: `chip ${!someoneElse && payerId === p.id ? 'on' : ''}`, text: p.name,
+          attrs: { role: 'radio', 'aria-checked': !someoneElse && payerId === p.id },
+          on: { click: () => { payerId = p.id; someoneElse = false; drawChips(); } }
+        })),
+        h('button', {
+          class: `chip ${someoneElse ? 'on' : ''}`, text: 'Someone else…',
+          attrs: { role: 'radio', 'aria-checked': someoneElse },
+          on: { click: () => { someoneElse = true; payerId = undefined; drawChips(); guest.focus(); } }
+        }));
+      guestRow.hidden = !someoneElse;
+    };
+    drawChips();
+    const submit = () => {
+      const input = {
+        label: label.value, cents: toCents(amount.value),
+        ...(someoneElse ? { guest: guest.value } : payerId ? { payerId } : {})
+      };
+      const err = saveBill(input, existing?.id);
+      if (err) { error.textContent = err; return; }
+      haptic();
+      close();
+    };
+    for (const el of [label, amount, guest]) el.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+    return h('div', { class: 'sheet-body' },
+      group(
+        h('label', { class: 'row field' }, h('span', { text: 'What' }), label),
+        h('label', { class: 'row field' }, h('span', { text: 'Amount ($)' }), amount)),
+      h('div', { class: 'section-title' }, h('span', { text: 'Who paid?' })),
+      chips, group(guestRow),
+      h('p', { class: 'muted small', text: 'Shared equally by everyone who played.' }),
+      error,
+      h('button', { class: 'btn primary block', text: existing ? 'Save changes' : 'Add expense', on: { click: submit } }),
+      ...(existing ? [h('button', { class: 'btn danger block', text: 'Delete expense', on: { click: () => { close(); confirmSheet({
+        title: 'Delete this expense?', message: `${existing.label} · ${formatCurrency(existing.cents)}`, confirmLabel: 'Delete', destructive: true,
+        onConfirm: () => { removeBill(existing.id); toast('Expense deleted'); }
+      }); } } })] : []));
+  });
+}
+
+/**
+ * The question asked when someone taps End & settle and no expenses were entered yet.
+ * `proceed` continues with the normal chip check / confirmation.
+ */
+export function askExtraExpenses(proceed: () => void) {
+  openSheet('Any extra expenses?', close => h('div', { class: 'sheet-body' },
+    h('p', { class: 'muted', text: 'Was there food, drinks or anything else paid by a player — or by someone who isn’t playing? It will be shared equally and added to the settlement.' }),
+    h('button', { class: 'btn primary block', text: 'No extra expenses', on: { click: () => { close(); proceed(); } } }),
+    h('button', { class: 'btn tinted block', text: 'Yes, add expenses', on: { click: () => { close(); openExpenses(proceed); } } }),
+    h('button', { class: 'btn plain block', text: 'Not now', on: { click: close } })));
+}
+
+/** One line per person for the confirmation: poker + expenses = final. */
+export function previewLines(): string {
+  const a = audit();
+  if (a.billsTotalCents === 0) return '';
+  const lines = a.players.map(p => `${p.name}: ${formatCurrency(p.netCents, true)} poker ${p.paidCents - p.shareCents >= 0 ? '+' : '−'} ${formatCurrency(Math.abs(p.paidCents - p.shareCents))} food = ${formatCurrency(p.finalCents, true)}`);
+  a.guests.forEach(g => lines.push(`${g.name} (not playing): ${formatCurrency(g.finalCents, true)}`));
+  return `Extra expenses ${formatCurrency(a.billsTotalCents)}, shared equally:\n${lines.join('\n')}\n\n`;
+}
+
+export { checkBill };

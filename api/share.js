@@ -5,6 +5,9 @@ import { createHash, randomBytes, randomInt, timingSafeEqual } from "node:crypto
 
 // src/engine.ts
 var MAX_NAME = 40;
+var MAX_BILLS = 30;
+var MAX_GUESTS = 8;
+var MAX_BILL_CENTS = 1e7;
 function toCents(val) {
   const str = typeof val === "number" ? Number.isFinite(val) ? String(val) : "" : String(val ?? "");
   const m = /^(-?)(\d*)(?:\.(\d*))?$/.exec(str.replace(/[$,\s]/g, ""));
@@ -43,6 +46,36 @@ function sanitizePlayers(raw) {
       cashOutCents: safeCents(o.cashOutCents)
     });
   });
+  return out;
+}
+function sanitizeBills(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  const guests = /* @__PURE__ */ new Set();
+  const seen = /* @__PURE__ */ new Set();
+  for (const r of raw) {
+    if (out.length >= MAX_BILLS) break;
+    if (!r || typeof r !== "object") continue;
+    const o = r;
+    const n = typeof o.cents === "number" ? o.cents : Number(o.cents);
+    if (!Number.isFinite(n)) continue;
+    const cents = Math.min(MAX_BILL_CENTS, Math.round(n));
+    if (cents <= 0) continue;
+    let id = typeof o.id === "string" && o.id ? o.id.slice(0, 64) : `b_${out.length}`;
+    while (seen.has(id)) id += "_";
+    const bill = { id, label: String(typeof o.label === "string" ? o.label : "Expense").trim().slice(0, MAX_NAME) || "Expense", cents };
+    const payerId = typeof o.payerId === "string" && o.payerId ? o.payerId.slice(0, 64) : "";
+    const guest = typeof o.guest === "string" ? o.guest.trim().slice(0, MAX_NAME) : "";
+    if (payerId) bill.payerId = payerId;
+    else {
+      const key = (guest || "Someone else").toLowerCase();
+      if (!guests.has(key) && guests.size >= MAX_GUESTS) continue;
+      guests.add(key);
+      bill.guest = guest || "Someone else";
+    }
+    seen.add(id);
+    out.push(bill);
+  }
   return out;
 }
 var MIN_UNIT = 0.01;
@@ -95,6 +128,7 @@ function sanitizeSnapshot(raw, now = Date.now()) {
     isEnded: o.isEnded === true,
     players: sanitizePlayers(o.players),
     paid: sanitizePaid(o.paid),
+    bills: sanitizeBills(o.bills),
     updatedAt: now
   };
 }

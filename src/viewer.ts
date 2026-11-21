@@ -120,7 +120,7 @@ export function mountViewer(rawCode: string) {
     if (!snap) {
       return [group(h('div', { class: 'row empty' }, h('span', { text: phase === 'offline' ? 'Can’t reach the server — retrying…' : 'Loading the table…' })))];
     }
-    const a = solve(snap.players, snap.expenseCents, snap.defaultBuyIn);
+    const a = solve(snap.players, snap.expenseCents, snap.defaultBuyIn, snap.bills ?? []);
     const out: Node[] = [
       h('div', { class: 'demo-card view-only' },
         h('div', { class: 'grow' }, h('strong', { text: '👀 View only' }), h('span', { class: 'small', text: ' — only the host can make changes' })))
@@ -172,6 +172,14 @@ export function mountViewer(rawCode: string) {
       out.push(group(h('div', { class: 'row banner' }, h('span', { class: 'muted', text: 'Rake / expense' }), h('strong', { class: 'mono', text: formatCurrency(a.expenseCents) }))));
     }
 
+    if (a.billsTotalCents > 0) {
+      const nameOf = (b: { payerId?: string; guest?: string }) => (b.payerId && a.players.find(p => p.id === b.payerId)?.name) || b.guest || 'Someone else';
+      out.push(header('Extra expenses', `${formatCurrency(a.billsTotalCents)} · shared equally`));
+      out.push(group(...(snap.bills ?? []).map(b => h('div', { class: 'row' },
+        h('span', { class: 'grow' }, h('strong', { text: b.label }), h('div', { class: 'muted small', text: `paid by ${nameOf(b)}` })),
+        h('span', { class: 'mono', text: formatCurrency(b.cents) })))));
+    }
+
     if (a.players.length >= 2 && a.isBalanced) {
       out.push(header(snap.isEnded ? 'Who pays whom' : 'Payments if settled now', a.transfers.length ? `${a.transfers.length} transfer${a.transfers.length === 1 ? '' : 's'}` : ''));
       out.push(a.transfers.length === 0
@@ -195,7 +203,9 @@ export function mountViewer(rawCode: string) {
           h('span', { class: 'rank', text: i === 0 && p.netCents > 0 ? '🏆' : String(i + 1) }),
           h('span', { class: 'grow', text: p.name }),
           h('span', { class: 'muted mono', text: formatBuyInCount(p.buyInCount) }),
-          h('span', { class: `mono ${p.netCents > 0 ? 'good' : p.netCents < 0 ? 'bad' : 'muted'}`, text: formatCurrency(p.netCents, true) })))));
+          h('span', { class: `mono ${p.netCents > 0 ? 'good' : p.netCents < 0 ? 'bad' : 'muted'}`, text: formatCurrency(p.netCents, true) }),
+          ...(a.billsTotalCents > 0 ? [h('span', { class: `mono ${p.finalCents > 0 ? 'good' : p.finalCents < 0 ? 'bad' : 'muted'}`, text: `→ ${formatCurrency(p.finalCents, true)}` })] : [])))));
+      if (a.guests.length) out.push(group(...a.guests.map(g => h('div', { class: 'row standing' }, h('span', { class: 'rank', text: '🍕' }), h('span', { class: 'grow', text: `${g.name} (not playing)` }), h('span', { class: 'mono good', text: formatCurrency(g.finalCents, true) })))));
     }
     if (a.players.length >= 2 && a.isBalanced) {
       out.push(h('button', { class: 'btn tinted block', text: '🖼️ Save as picture', on: { click: () => sharePicture(drawSettlement(snap!.name, a, k => Boolean(snap!.paid[k])), 'settlement.png', snap!.name) } }));
@@ -219,6 +229,7 @@ export function mountViewer(rawCode: string) {
     } else {
       lines.push(h('div', { class: 'me-line muted', text: 'Your payments appear here once the table balances.' }));
     }
+    if (a.billsTotalCents > 0) lines.unshift(h('div', { class: 'me-line muted small', text: `Poker ${formatCurrency(me.netCents, true)} · Expenses ${formatCurrency(me.paidCents - me.shareCents, true)} · Final ${formatCurrency(me.finalCents, true)}` }));
     return h('div', { class: 'me-card' },
       h('div', { class: 'me-head' },
         h('strong', { text: `You: ${me.name}` }),

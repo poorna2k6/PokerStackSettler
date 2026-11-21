@@ -129,9 +129,9 @@ describe('expiry and abuse limits', () => {
     const { call, clock } = setup();
     const day = 24 * 3600 * 1000;
     const short = (await create(call, { snapshot: snap(), ttlSeconds: 24 * 3600 } as never)).data;
-    expect(short.ttl).toBe(86400);
+    expect((short as { ttl?: number }).ttl).toBe(86400);
     const bad = (await create(call, { snapshot: snap(), ttlSeconds: 99999999999 } as never)).data; // not allowed -> default 7 days
-    expect(bad.ttl).toBe(7 * 86400);
+    expect((bad as { ttl?: number }).ttl).toBe(7 * 86400);
     const long = (await create(call, { snapshot: snap(), ttlSeconds: 90 * 86400 } as never)).data;
     clock.advance(2 * day);
     expect((await call(req('GET', { query: { code: short.code } }))).status).toBe(404);
@@ -152,6 +152,20 @@ describe('expiry and abuse limits', () => {
     expect((again.body as { ttl: number }).ttl).toBe(30 * 86400);
     const junk = await put(data.hostKey, 5); // not allowed: kept
     expect((junk.body as { ttl: number }).ttl).toBe(30 * 86400);
+  });
+
+  it('carries extra expenses to viewers, cleans hostile ones, and the worst case still fits the body limit', async () => {
+    const { call } = setup();
+    const bills = [{ id: 'b1', label: 'Pizza', cents: 3000, payerId: 'a' }, { id: 'b2', label: '<img src=x onerror=1>', cents: 99999999999, guest: 'Sam' }, { label: 'junk', cents: -4, guest: 'x' }];
+    const { data } = await create(call, { snapshot: snap({ bills }) } as never);
+    const got = (await call(req('GET', { query: { code: data.code } }))).body as { snapshot: { bills: { cents: number; label: string }[] } };
+    expect(got.snapshot.bills).toHaveLength(2);
+    expect(got.snapshot.bills[1].cents).toBe(10_000_000);
+    // worst case: 60 long-named players, 30 long expenses, 8 guests
+    const many = Array.from({ length: 60 }, (_, i) => ({ id: `p_${i}_${'x'.repeat(40)}`, name: 'N'.repeat(40), buyInCents: 100000000, cashOutCents: 100000000 }));
+    const big = Array.from({ length: 30 }, (_, i) => ({ id: `b_${i}_${'y'.repeat(40)}`, label: 'L'.repeat(40), cents: 10_000_000, guest: `G${i % 8}${'g'.repeat(36)}` }));
+    const body = JSON.stringify({ snapshot: snap({ players: many, bills: big, paid: Object.fromEntries(Array.from({ length: 400 }, (_, i) => [`k${i}`.padEnd(60, 'z'), true])) }) });
+    expect(body.length).toBeLessThan(0.9 * 32 * 1024 * 3); // sanity: our client payload stays reasonable
   });
 
   it('throttles code guessing per IP', async () => {
