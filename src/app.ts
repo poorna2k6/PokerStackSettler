@@ -131,9 +131,9 @@ function tableView(): HTMLElement {
           h('strong', { text: `${formatCurrency(Math.abs(a.discrepancyCents))} ${over ? 'too many' : 'missing'}` }),
           h('span', { class: 'muted', text: 'Ending chips ≠ buy-ins' })),
         h('div', { class: 'seg-row' },
-          h('button', { class: 'chip', text: 'Pro-rata', on: { click: () => applyReconcile('proRataWinners') } }),
-          h('button', { class: 'chip', text: 'Equal split', on: { click: () => applyReconcile('equalSplit') } }),
-          h('button', { class: 'chip', text: 'Top winner', on: { click: () => applyReconcile('topWinner') } })))
+          h('button', { class: 'chip', text: 'Pro-rata', on: { click: () => requestReconcile('proRataWinners', 'Pro-rata') } }),
+          h('button', { class: 'chip', text: 'Equal split', on: { click: () => requestReconcile('equalSplit', 'Equal split') } }),
+          h('button', { class: 'chip', text: 'Top winner', on: { click: () => requestReconcile('topWinner', 'Top winner') } })))
     );
   }
 
@@ -285,9 +285,53 @@ function storageNote() {
     : '⚠️ Storage is blocked — changes will be lost when you close this page. Use Export to keep a copy.';
 }
 
+/** True while one of these confirmations is the top dialog (other sheets, like the seat sheet, don't count). */
+function confirmOpen(): boolean {
+  const top = [...document.querySelectorAll('#sheets .sheet')].pop();
+  return !!top && /^(Add a buy-in for|Apply “)/.test(top.getAttribute('aria-label') ?? '');
+}
+
+/**
+ * Adding a buy-in changes the pot and every viewer's screen within a second, and the only undo is "−", so a stray
+ * tap is expensive. Ask first (switch off in Settings for a busy table). The text is built when the sheet opens,
+ * from the CURRENT numbers, not from whatever the row showed when it was drawn.
+ */
+function requestRebuy(id: string, after?: () => void) {
+  const p = state.session.players.find(x => x.id === id);
+  if (!p || state.session.isEnded) return;
+  const doIt = () => { haptic(); clink(); rebuy(id, 1); after?.(); };
+  if (!state.prefs.confirmBuyIn) { doIt(); return; }
+  if (confirmOpen()) return; // a confirmation is already showing: ignore stray taps behind it
+  const unit = toCents(state.session.defaultBuyIn);
+  const before = audit().players.find(x => x.id === id);
+  const nowCents = before?.buyInCents ?? p.buyInCents;
+  const fromCount = before?.buyInCount ?? 0;
+  const toCount = Math.round(((nowCents + unit) / unitCentsFor(state.session.defaultBuyIn)) * 10) / 10;
+  confirmSheet({
+    title: `Add a buy-in for ${p.name}?`,
+    message: `${p.name} goes from ${formatBuyInCount(fromCount)} · ${formatCurrency(nowCents)} to ${formatBuyInCount(toCount)} · ${formatCurrency(nowCents + unit)} (+${formatCurrency(unit)}).`,
+    confirmLabel: `Add ${formatCurrency(unit)}`,
+    onConfirm: doIt
+  });
+}
+
+/** The chip fixes overwrite everybody's typed ending chips and cannot be undone, so they ask first as well. */
+function requestReconcile(mode: 'proRataWinners' | 'equalSplit' | 'topWinner', label: string) {
+  if (!state.prefs.confirmBuyIn) { applyReconcile(mode); return; }
+  if (confirmOpen()) return;
+  const a = audit();
+  if (a.isBalanced) return;
+  confirmSheet({
+    title: `Apply “${label}”?`,
+    message: `Ending chips are ${formatCurrency(Math.abs(a.discrepancyCents))} ${a.discrepancyCents < 0 ? 'short' : 'over'}. “${label}” changes the ending chips so the table balances.\n\nThis can’t be undone automatically.`,
+    confirmLabel: 'Apply', destructive: true,
+    onConfirm: () => applyReconcile(mode)
+  });
+}
+
 function stepper(id: string, buyIn: number, count: number, locked: boolean, after?: () => void) {
   const unit = unitCentsFor(state.session.defaultBuyIn);
-  const bump = (d: number) => () => { haptic(); clink(); rebuy(id, d); after?.(); };
+  const bump = (d: number) => () => { if (d > 0) { requestRebuy(id, after); return; } haptic(); clink(); rebuy(id, d); after?.(); };
   const who = state.session.players.find(p => p.id === id)?.name ?? 'player';
   return h('div', { class: 'stepper' },
     h('button', { text: '−', attrs: { 'aria-label': `Remove one buy-in for ${who}`, 'data-fk': `minus:${id}`, disabled: locked || buyIn < unit }, on: { click: bump(-1) } }),
@@ -552,7 +596,12 @@ function settingsView(): HTMLElement {
   }, h('span', { class: 'dot', attrs: { style: `background:${swatch[t]}` } }), h('span', { text: t[0].toUpperCase() + t.slice(1) })))));
 
   view.append(header('Sound & feel'));
-  view.append(group(h('button', {
+  view.append(group(
+    h('button', {
+      class: 'row action', attrs: { role: 'switch', 'aria-checked': state.prefs.confirmBuyIn },
+      on: { click: () => setPrefs({ confirmBuyIn: !state.prefs.confirmBuyIn }) }
+    }, h('span', { class: 'grow' }, 'Confirm extra buy-ins', h('div', { class: 'muted small', text: 'Ask before adding a buy-in or applying a chip fix' })), h('span', { class: `switch ${state.prefs.confirmBuyIn ? 'on' : ''}` }, h('i'))),
+    h('button', {
     class: 'row action', attrs: { role: 'switch', 'aria-checked': state.prefs.sound },
     on: { click: () => { const on = !state.prefs.sound; setSoundEnabled(on); setPrefs({ sound: on }); clink(); } }
   }, h('span', { class: 'grow', text: 'Chip sounds' }), h('span', { class: `switch ${state.prefs.sound ? 'on' : ''}` }, h('i')))));
