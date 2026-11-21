@@ -1,5 +1,5 @@
 import {
-  MAX_BILLS, MAX_GUESTS, MAX_BILL_CENTS, buildNotepad, parseBackup, parseBuyInUnit, reconcile, solve, toCents,
+  MAX_BILLS, MAX_GUESTS, MAX_BILL_CENTS, MAX_LOG, formatCurrency, buildNotepad, parseBackup, parseBuyInUnit, reconcile, solve, toCents,
   type Bill, type Player, type ReconcileMode, type SavedSession, type SessionData
 } from './engine';
 import { PRESETS, type Preset } from './presets';
@@ -96,12 +96,12 @@ function replaceSession(next: SessionData) {
  * Becoming the host of a table someone else was running. The table that was open on this phone is kept in
  * History first, so nothing is lost.
  */
-export function adoptSharedSession(s: { name: string; defaultBuyIn: number; expenseCents: number; isEnded: boolean; players: Player[]; paid: Record<string, boolean>; bills?: Bill[] }, share: NonNullable<SessionData['share']>) {
+export function adoptSharedSession(s: { name: string; defaultBuyIn: number; expenseCents: number; isEnded: boolean; players: Player[]; paid: Record<string, boolean>; bills?: Bill[]; log?: { t: number; m: string }[] }, share: NonNullable<SessionData['share']>) {
   const cur = state.session;
   if (!cur.isDemo && cur.players.length > 0 && cur.share?.code !== share.code) saveToHistory('Saved before taking over a table');
   replaceSession({
     id: uid('sess'), name: s.name, defaultBuyIn: s.defaultBuyIn, expenseCents: s.expenseCents, isEnded: s.isEnded,
-    isDemo: false, share, players: s.players.map(p => ({ ...p })), paid: { ...s.paid }, bills: (s.bills ?? []).map(b => ({ ...b }))
+    isDemo: false, share, players: s.players.map(p => ({ ...p })), paid: { ...s.paid }, bills: (s.bills ?? []).map(b => ({ ...b })), log: (s.log ?? []).map(e => ({ ...e }))
   });
   state.tab = 'table';
   commit();
@@ -117,7 +117,7 @@ export function shareSnapshot() {
   const s = state.session;
   return {
     name: s.name, defaultBuyIn: s.defaultBuyIn, expenseCents: s.expenseCents,
-    isEnded: s.isEnded, players: s.players, paid: s.paid, bills: s.bills ?? []
+    isEnded: s.isEnded, players: s.players, paid: s.paid, bills: s.bills ?? [], log: s.log ?? []
   };
 }
 
@@ -140,23 +140,32 @@ export function setUnit(v: string): boolean {
 }
 export function setExpense(v: string) { state.session.expenseCents = Math.max(0, toCents(v)); commit(); }
 
+/** Remember something that happened, so viewers can see the game moving (last MAX_LOG entries). */
+function note(m: string) {
+  const s = state.session;
+  s.log = [...(s.log ?? []), { t: Date.now(), m: m.slice(0, 80) }].slice(-MAX_LOG);
+}
+
 export function addPlayer(name: string, buyIns: number) {
   const unit = toCents(state.session.defaultBuyIn);
   state.session.players.push({
     id: uid('p'), name: name.trim().slice(0, 40) || `Player ${state.session.players.length + 1}`,
     buyInCents: Math.round(Math.max(0, buyIns) * unit), cashOutCents: 0
   });
+  note(`${state.session.players[state.session.players.length - 1].name} joined`);
   commit();
 }
 export function removePlayer(id: string) {
   const gone = state.session.players.find(p => p.id === id);
   // an expense this player paid stays: it is now paid by someone who is not in the list
+  if (gone) note(`${gone.name} left the table`);
   if (gone) for (const b of state.session.bills ?? []) if (b.payerId === id) { delete b.payerId; b.guest = gone.name; }
+  for (const b of state.session.bills ?? []) if (b.sharedBy) { b.sharedBy = b.sharedBy.filter(x => x !== id); if (!b.sharedBy.length) delete b.sharedBy; }
   state.session.players = state.session.players.filter(p => p.id !== id);
   commit();
 }
 
-export type BillInput = { label: string; cents: number; payerId?: string; guest?: string };
+export type BillInput = { label: string; cents: number; payerId?: string; guest?: string; sharedBy?: string[] };
 /** Returns an error message, or null when the expense was saved. */
 export function checkBill(input: BillInput, ignoreId?: string): string | null {
   const s = state.session;
@@ -181,26 +190,33 @@ export function saveBill(input: BillInput, id?: string): string | null {
   const s = state.session;
   const bill: Bill = { id: id ?? uid('b'), label: input.label.trim().slice(0, 40) || 'Expense', cents: Math.round(input.cents) };
   if (input.payerId) bill.payerId = input.payerId; else bill.guest = input.guest!.trim().slice(0, 40);
+  if (input.sharedBy?.length) bill.sharedBy = [...new Set(input.sharedBy)];
   const list = s.bills ?? [];
   s.bills = id && list.some(b => b.id === id) ? list.map(b => (b.id === id ? bill : b)) : [...list, bill];
+  note(`${id ? 'Updated' : 'Added'} expense: ${bill.label} ${formatCurrency(bill.cents)}`);
   s.paid = {};
   commit();
   return null;
 }
 export function removeBill(id: string) {
+  const gone = (state.session.bills ?? []).find(b => b.id === id);
+  if (gone) note(`Removed expense: ${gone.label}`);
   state.session.bills = (state.session.bills ?? []).filter(b => b.id !== id);
   state.session.paid = {};
   commit();
 }
 export function updatePlayer(id: string, patch: Partial<Player>) {
   const p = state.session.players.find(x => x.id === id);
+  if (p && patch.cashOutCents !== undefined && patch.cashOutCents !== p.cashOutCents) note(`${p.name} chips ${formatCurrency(patch.cashOutCents)}`);
   if (p) Object.assign(p, patch);
   commit();
 }
 export function rebuy(id: string, delta: number) {
   const p = state.session.players.find(x => x.id === id);
   if (!p) return;
+  const before = p.buyInCents;
   p.buyInCents = Math.max(0, p.buyInCents + delta * toCents(state.session.defaultBuyIn));
+  if (p.buyInCents !== before) note(`${p.name} ${delta > 0 ? 'bought in' : 'took back'} ${formatCurrency(Math.abs(p.buyInCents - before))}`);
   commit();
 }
 
@@ -256,10 +272,11 @@ export function endSession(): boolean {
     s.players = fixed;
   }
   state.session.isEnded = true;
+  note('Game settled');
   if (state.session.isDemo) commit(); else saveToHistory('Completed & Settled');
   return true;
 }
-export function reopenSession() { state.session.isEnded = false; commit(); }
+export function reopenSession() { state.session.isEnded = false; note('Game reopened'); commit(); }
 
 export function newSession(p?: Preset) {
   replaceSession(p ? fromPreset(p) : {

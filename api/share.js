@@ -66,6 +66,10 @@ function sanitizeBills(raw) {
     const bill = { id, label: String(typeof o.label === "string" ? o.label : "Expense").trim().slice(0, MAX_NAME) || "Expense", cents };
     const payerId = typeof o.payerId === "string" && o.payerId ? o.payerId.slice(0, 64) : "";
     const guest = typeof o.guest === "string" ? o.guest.trim().slice(0, MAX_NAME) : "";
+    if (Array.isArray(o.sharedBy)) {
+      const ids = [...new Set(o.sharedBy.filter((x) => typeof x === "string" && x.length > 0 && x.length <= 80))].slice(0, 70);
+      if (ids.length) bill.sharedBy = ids;
+    }
     if (payerId) bill.payerId = payerId;
     else {
       const key = (guest || "Someone else").toLowerCase();
@@ -75,6 +79,19 @@ function sanitizeBills(raw) {
     }
     seen.add(id);
     out.push(bill);
+  }
+  return out;
+}
+var MAX_LOG = 30;
+function sanitizeLog(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const r of raw.slice(-MAX_LOG)) {
+    if (!r || typeof r !== "object") continue;
+    const o = r;
+    const t = Number(o.t);
+    if (!Number.isFinite(t) || typeof o.m !== "string") continue;
+    out.push({ t: Math.round(t), m: o.m.slice(0, 80) });
   }
   return out;
 }
@@ -129,6 +146,7 @@ function sanitizeSnapshot(raw, now = Date.now()) {
     players: sanitizePlayers(o.players),
     paid: sanitizePaid(o.paid),
     bills: sanitizeBills(o.bills),
+    log: sanitizeLog(o.log),
     updatedAt: now
   };
 }
