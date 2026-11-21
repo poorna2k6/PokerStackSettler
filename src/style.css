@@ -305,3 +305,4 @@ input::placeholder { color: var(--muted); } input:focus { outline: none; color: 
 .subtitle.fresh { font-size: 12px; opacity: .85; margin-top: -2px; }
 .qr-box { width: 200px; height: 200px; margin: 6px auto; border-radius: 12px; overflow: hidden; background: #fff; }
 .qr-box svg { width: 100%; height: 100%; display: block; }
+.row[hidden] { display: none; }

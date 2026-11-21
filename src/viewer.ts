@@ -182,9 +182,9 @@ export function mountViewer(rawCode: string) {
 
     if (a.billsTotalCents > 0) {
       const nameOf = (b: { payerId?: string; guest?: string }) => (b.payerId && a.players.find(p => p.id === b.payerId)?.name) || b.guest || 'Someone else';
-      out.push(header('Extra expenses', `${formatCurrency(a.billsTotalCents)} · shared equally`));
+      out.push(header('Extra expenses', formatCurrency(a.billsTotalCents)));
       out.push(group(...(snap.bills ?? []).map(b => h('div', { class: 'row' },
-        h('span', { class: 'grow' }, h('strong', { text: b.label }), h('div', { class: 'muted small', text: `paid by ${nameOf(b)}` })),
+        h('span', { class: 'grow' }, h('strong', { text: b.label }), h('div', { class: 'muted small', text: `paid by ${nameOf(b)} · ${b.sharedBy?.length ? `shared by ${b.sharedBy.length}` : 'shared by everyone'}` })),
         h('span', { class: 'mono', text: formatCurrency(b.cents) })))));
     }
 
@@ -213,7 +213,7 @@ export function mountViewer(rawCode: string) {
           h('span', { class: 'muted mono', text: formatBuyInCount(p.buyInCount) }),
           h('span', { class: `mono ${p.netCents > 0 ? 'good' : p.netCents < 0 ? 'bad' : 'muted'}`, text: formatCurrency(p.netCents, true) }),
           ...(a.billsTotalCents > 0 ? [h('span', { class: `mono ${p.finalCents > 0 ? 'good' : p.finalCents < 0 ? 'bad' : 'muted'}`, text: `→ ${formatCurrency(p.finalCents, true)}` })] : [])))));
-      if (a.guests.length) out.push(group(...a.guests.map(g => h('div', { class: 'row standing' }, h('span', { class: 'rank', text: '🍕' }), h('span', { class: 'grow', text: `${g.name} (not playing)` }), h('span', { class: 'mono good', text: formatCurrency(g.finalCents, true) })))));
+      if (a.guests.length) out.push(group(...a.guests.map(g => h('div', { class: 'row standing' }, h('span', { class: 'rank', text: '🍕' }), h('span', { class: 'grow', text: `${g.name} (not playing)` }), h('span', { class: `mono ${g.finalCents > 0 ? 'good' : g.finalCents < 0 ? 'bad' : 'muted'}`, text: formatCurrency(g.finalCents, true) })))));
     }
     const recent = (snap.log ?? []).slice(-8).reverse();
     if (recent.length) {

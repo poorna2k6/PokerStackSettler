@@ -193,15 +193,28 @@ export function saveBill(input: BillInput, id?: string): string | null {
   if (input.sharedBy?.length) bill.sharedBy = [...new Set(input.sharedBy)];
   const list = s.bills ?? [];
   s.bills = id && list.some(b => b.id === id) ? list.map(b => (b.id === id ? bill : b)) : [...list, bill];
+  pruneShares();
   note(`${id ? 'Updated' : 'Added'} expense: ${bill.label} ${formatCurrency(bill.cents)}`);
   s.paid = {};
   commit();
   return null;
 }
+/** A guest id in someone's "shared by" list is only meaningful while that guest still paid for something. */
+function pruneShares() {
+  const s = state.session;
+  const players = new Set(s.players.map(p => p.name.trim().toLowerCase()));
+  const guests = new Set((s.bills ?? []).filter(b => !b.payerId && b.guest && !players.has(b.guest.trim().toLowerCase())).map(b => `guest:${b.guest!.trim().toLowerCase()}`));
+  for (const b of s.bills ?? []) if (b.sharedBy) {
+    b.sharedBy = b.sharedBy.filter(x => !x.startsWith('guest:') || guests.has(x));
+    if (!b.sharedBy.length) delete b.sharedBy;
+  }
+}
+
 export function removeBill(id: string) {
   const gone = (state.session.bills ?? []).find(b => b.id === id);
   if (gone) note(`Removed expense: ${gone.label}`);
   state.session.bills = (state.session.bills ?? []).filter(b => b.id !== id);
+  pruneShares();
   state.session.paid = {};
   commit();
 }

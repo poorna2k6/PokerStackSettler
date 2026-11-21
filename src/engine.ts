@@ -609,14 +609,14 @@ export function buildNotepad(s: SavedSession | (SessionData & { timestamp?: stri
     );
   });
   if (audit.billsTotalCents > 0) {
-    lines.push(dash, 'EXTRA EXPENSES (shared equally by the players)', dash);
+    lines.push(dash, 'EXTRA EXPENSES (each split equally between the people it was shared by)', dash);
     for (const b of s.bills ?? []) {
       const payer = (b.payerId && audit.players.find(p => p.id === b.payerId)?.name) || b.guest || 'Someone else';
-      lines.push(`- ${b.label}: ${formatCurrency(b.cents)} paid by ${payer}`);
+      lines.push(`- ${b.label}: ${formatCurrency(b.cents)} paid by ${payer}${b.sharedBy?.length ? ` (shared by ${b.sharedBy.length})` : ''}`);
     }
     lines.push(`Total: ${formatCurrency(audit.billsTotalCents)}`, '', 'Player                Poker      Paid     Share     Final');
     audit.players.forEach(p => lines.push([p.name.slice(0, 19).padEnd(20), formatCurrency(p.netCents, true).padStart(9), formatCurrency(p.paidCents).padStart(9), formatCurrency(-p.shareCents).padStart(9), formatCurrency(p.finalCents, true).padStart(9)].join(' ')));
-    audit.guests.forEach(g => lines.push([`${g.name.slice(0, 15)} (guest)`.padEnd(20), ''.padStart(9), formatCurrency(g.paidCents).padStart(9), ''.padStart(9), formatCurrency(g.finalCents, true).padStart(9)].join(' ')));
+    audit.guests.forEach(g => lines.push([`${g.name.slice(0, 15)} (guest)`.padEnd(20), ''.padStart(9), formatCurrency(g.paidCents).padStart(9), formatCurrency(-g.shareCents).padStart(9), formatCurrency(g.finalCents, true).padStart(9)].join(' ')));
   }
   lines.push(dash, `2. WHO PAYS WHOM (${audit.transfers.length} transfers)`, dash);
   if (audit.transfers.length === 0) lines.push('* No payments needed.');
@@ -651,7 +651,7 @@ export function buildReceipt(
     .forEach(p =>
       lines.push(`• ${p.name} [${formatBuyInCount(p.buyInCount)}]: ${formatCurrency(p.netCents, true)}${audit.billsTotalCents > 0 ? ` → ${formatCurrency(p.finalCents, true)} after food & drinks` : ''}`)
     );
-  audit.guests.forEach(g => lines.push(`• ${g.name} (paid for food/drinks): ${formatCurrency(g.finalCents, true)}`));
+  audit.guests.forEach(g => lines.push(`• ${g.name} (not playing, food & drinks): ${formatCurrency(g.finalCents, true)}`));
   return lines.join('\n');
 }
 
