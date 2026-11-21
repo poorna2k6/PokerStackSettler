@@ -61,8 +61,15 @@ export const onCommit = (fn: Listener) => commitHooks.push(fn);
 const stamp = (d = new Date()) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 
+let persistLocked = false;
+/**
+ * Another tab on this phone became the host of the table this tab was running. Both tabs share one saved copy, so
+ * from now on this tab must not write it (that would erase the new host's key).
+ */
+export function lockPersistence() { persistLocked = true; }
+
 export function commit() {
-  state.storageOk = saveLive(state.session);
+  if (!persistLocked) state.storageOk = saveLive(state.session);
   state.lastSave = stamp().slice(11);
   commitHooks.forEach(fn => fn());
   listeners.forEach(fn => fn());
