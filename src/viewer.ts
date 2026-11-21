@@ -293,10 +293,13 @@ export function mountViewer(rawCode: string) {
       if (!data.unchanged && data.snapshot) { snap = data.snapshot; rev = data.rev; offer = data.offer; }
       phase = 'ok';
       updated = new Date().toTimeString().slice(0, 8);
+      // An offer that has run out must disappear even though nothing else changed.
+      const lapsed = !!offer && offer.expiresAt <= Date.now();
+      if (lapsed) offer = undefined;
       // Only rebuild the page when something changed, so keyboard focus and open sheets are not disturbed.
-      if (changed) render();
+      if (changed || lapsed) render();
       void checkClaim();
-      if (!changed && statusEl) { statusEl.textContent = statusText(); statusEl.className = `viewer-status ${phase}`; }
+      if (!changed && !lapsed && statusEl) { statusEl.textContent = statusText(); statusEl.className = `viewer-status ${phase}`; }
     } catch (e) {
       failures += 1;
       phase = 'offline';

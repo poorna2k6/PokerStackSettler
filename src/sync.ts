@@ -2,7 +2,8 @@
 // it pushes snapshots to /api/share using a secret host key that never leaves this device.
 import { closeAllSheets, confirmSheet, toast } from './dom';
 import { normalizeCode, type SharedSnapshot } from './shared';
-import { notify, onCommit, onShareOrphaned, setShare, shareSnapshot, state } from './state';
+import { lockPersistence, notify, onCommit, onShareOrphaned, setShare, shareSnapshot, state } from './state';
+import { loadLive } from './storage';
 
 const API = '/api/share';
 const PUSH_DELAY_MS = 600;
@@ -45,12 +46,18 @@ export async function call<T>(method: string, query: string, body?: unknown, hos
 
 /** This phone is no longer the host. The local copy stays; the person can watch live instead. */
 export function handedOver(code: string, who?: string) {
+  // Did ANOTHER TAB on this phone become the host? Then the saved copy now holds that tab's key, and this tab must
+  // leave it alone (it shares the same storage).
+  const mine = state.session.share;
+  const stored = loadLive()?.share;
+  const otherTab = !!mine && !!stored && stored.code === mine.code && stored.hostKey !== mine.hostKey;
+  if (otherTab) lockPersistence();
   if (state.session.share?.code === code) setShare(undefined);
   setPhase('off', '');
   closeAllSheets(); // e.g. a 'Hand over the table' sheet that no longer applies
   setTimeout(() => confirmSheet({
     title: 'Table handed over',
-    message: `${who ? `${who} is` : 'Someone else is'} now the host of “${state.session.name}”. Your own copy stays on this phone.`,
+    message: `${who ? `${who} is` : 'Someone else is'} now the host of “${state.session.name}”. ${otherTab ? 'Another tab on this phone took over, so changes in this tab are no longer saved — reload it.' : 'Your own copy stays on this phone.'}`,
     confirmLabel: 'Watch live', cancelLabel: 'Keep my copy',
     onConfirm: () => { location.hash = `#/v/${code}`; }
   }), 240);
