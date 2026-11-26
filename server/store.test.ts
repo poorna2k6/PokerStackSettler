@@ -11,15 +11,19 @@ describe('pickStore', () => {
 
   it('refuses to fall back to memory on Vercel, and says why in the logs', () => {
     const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    expect(pickStore({ VERCEL: '1' }).kind).toBe('unconfigured');
+    expect(pickStore({ VERCEL: '1', ALLOW_MEMORY_STORE: '0' }).kind).toBe('unconfigured');
     expect(log).toHaveBeenCalledWith(expect.stringContaining('NOT configured'));
     // half-configured is still unconfigured
-    expect(pickStore({ VERCEL: '1', KV_REST_API_URL: 'https://x' }).kind).toBe('unconfigured');
+    expect(pickStore({ VERCEL: '1', ALLOW_MEMORY_STORE: '0', KV_REST_API_URL: 'https://x' }).kind).toBe('unconfigured');
   });
 
   it('allows memory locally, or on Vercel only when asked for explicitly', () => {
     expect(pickStore({}).kind).toBe('memory');
     expect(pickStore({ VERCEL: '1', ALLOW_MEMORY_STORE: '1' }).kind).toBe('memory');
+    // default on Vercel without Redis: temporary memory (works for a while), with a warning in the logs
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    expect(pickStore({ VERCEL: '1' }).kind).toBe('memory');
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('temporary memory'));
   });
 });
 
