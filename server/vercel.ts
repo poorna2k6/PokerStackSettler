@@ -30,7 +30,10 @@ export default async function handler(req: VercelLike, res: ServerResponse) {
     body: req.body,
     ip: (headers['x-forwarded-for'] ?? '').split(',')[0].trim() || req.socket.remoteAddress || 'unknown'
   };
-  const out = await handleShare(apiReq, getStore());
+  // The server secret lets a lost table be restored only by its real host (see handler.ts). Redis credentials are
+  // already secret and stable across restarts, so they serve when SHARE_SECRET is not set.
+  const secret = process.env.SHARE_SECRET ?? process.env.UPSTASH_REDIS_REST_TOKEN ?? process.env.KV_REST_API_TOKEN;
+  const out = await handleShare(apiReq, getStore(), Date.now(), undefined, secret);
   res.statusCode = out.status;
   res.setHeader('Content-Type', 'application/json');
   for (const [k, v] of Object.entries(out.headers ?? {})) res.setHeader(k, v);

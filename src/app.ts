@@ -1,7 +1,7 @@
 import { h, haptic, openSheet, confirmSheet, setFocusFallback, toast } from './dom';
 import { clink, setSoundEnabled } from './sound';
-import { MAX_SEATS, avatar, chipStack, group, header, kpi, ovalTable } from './ui';
-import { SHARE_TTL_CHOICES, SHARE_TTL_SECONDS, formatCode, normalizeCode } from './shared';
+import { MAX_SEATS, amountCol, avatar, chipStack, group, header, kpi, ovalTable } from './ui';
+import { FINAL_TTL_CHOICES, SHARE_TTL_CHOICES, SHARE_TTL_SECONDS, formatCode, normalizeCode } from './shared';
 import { openHandsSheet } from './hands';
 import { askExtraExpenses, openExpenses, previewLines } from './expenses';
 import { openHandoverSheet } from './handover';
@@ -17,7 +17,7 @@ import { THEMES, type Theme } from './storage';
 import {
   addPlayer, applyReconcile, audit, clearHistory, deleteSaved, endSession, importBackup, loadSaved,
   newSession, paidKey, rebuy, removePlayer, reopenSession, saveToHistory, sessionText, setExpense,
-  setName, setPrefs, setTab, setTheme, setUnit, state, subscribe, togglePaid, updatePlayer, type Tab
+  setFinalTtl, setName, setNote, setPrefs, setRound, setTab, setTheme, setUnit, state, subscribe, togglePaid, updatePlayer, type Tab
 } from './state';
 
 const THEME_COLORS: Record<Theme, string> = { midnight: '#000000', felt: '#0a3d2a', ocean: '#06182c', light: '#f2f2f7' };
@@ -239,6 +239,11 @@ function openShareSheet() {
         return;
       }
       const url = shareUrl(share.code);
+      const storageNote = h('p', { class: 'muted small', attrs: { role: 'status' } });
+      void fetch('/api/share?action=health', { cache: 'no-store' }).then(r => r.json()).then((d: { store?: string }) => {
+        storageNote.textContent = d.store === 'redis' ? '✓ Link storage: permanent (Redis connected).' : '⚠️ Link storage is temporary — the link may vanish after a restart of the server. Connect Redis to make it last.';
+        if (d.store !== 'redis') storageNote.className = 'bad small';
+      }).catch(() => { /* offline: say nothing */ });
       const link = h('input', { attrs: { type: 'text', readonly: true, value: url, 'aria-label': 'View-only link', spellcheck: false }, on: { focus: () => link.select() } });
       link.value = url;
       statusEl = h('p', { class: 'muted small', text: shareStatus(), attrs: { role: 'status' } });
@@ -250,13 +255,14 @@ function openShareSheet() {
           if (navigator.share) { try { await navigator.share({ title: state.session.name, text: 'Watch our poker game live', url }); return; } catch (e) { if ((e as Error).name === 'AbortError') return; } }
           await copyText(url);
         } } }),
+        storageNote,
         h('div', { class: 'qr-box' }, renderQr(url, 'QR code for the view-only link')),
         h('p', { class: 'muted small center', text: 'Scan to watch live.' }),
         h('div', { class: 'two' },
           h('button', { class: 'btn tinted', text: 'Copy link', on: { click: () => copyText(url) } }),
           h('button', { class: 'btn tinted', text: 'Copy code', on: { click: () => copyText(formatCode(share.code)) } })),
         statusEl,
-        h('p', { class: 'muted small', text: `Viewers can’t edit anything. ${sync.expiresAt ? `The link is valid until ${new Date(sync.expiresAt).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })}; ` : ''}every change you make starts the ${ttlLabel(sync.ttl)} again, or until you stop sharing.` }),
+        h('p', { class: 'muted small', text: state.session.isEnded && sync.expiresAt ? `Viewers can’t edit anything. This is the final link: it stays live until ${new Date(sync.expiresAt).toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })} and is then deleted. Change the time on the Settle tab.` : `Viewers can’t edit anything. ${sync.expiresAt ? `The link is valid until ${new Date(sync.expiresAt).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })}; ` : ''}every change you make starts the ${ttlLabel(sync.ttl)} again, or until you stop sharing.` }),
         group(h('label', { class: 'row field' }, h('span', { text: 'Valid for' }),
           h('select', { attrs: { 'aria-label': 'How long the link stays valid' }, on: { change: e => { setShareTtl(Number((e.target as HTMLSelectElement).value)); toast('Link lifetime updated'); } } },
             ...SHARE_TTL_CHOICES.map(c => h('option', { text: c.label, attrs: { value: c.seconds, selected: c.seconds === (sync.ttl ?? SHARE_TTL_SECONDS) } }))))),
@@ -516,7 +522,7 @@ function settleView(): HTMLElement {
       h('button', { class: 'link', text: 'Fix on Table', on: { click: () => setTab('table') } }))));
   }
 
-  view.append(header('Who pays whom', a.transfers.length ? 'tap to mark paid' : ''));
+  view.append(header('Who pays whom', a.transfers.length ? `tap to mark paid${s.round ? ' · whole dollars' : ''}` : ''));
   if (a.transfers.length === 0 || !a.isBalanced || a.players.length < 2) {
     const msg = a.players.length < 2 ? 'Add at least 2 players to see payments'
       : !a.isBalanced ? 'Fix the chip mismatch to see payments'
@@ -545,10 +551,8 @@ function settleView(): HTMLElement {
   const hasBills = a.billsTotalCents > 0;
   view.append(group(...sorted.map((p, i) => h('div', { class: `row standing ${i === 0 && p.netCents > 0 ? 'gold' : ''}` },
     h('span', { class: 'rank', text: i === 0 && p.netCents > 0 ? '🏆' : String(i + 1) }),
-    h('span', { class: 'grow', text: p.name }),
-    h('span', { class: 'muted mono', text: formatBuyInCount(p.buyInCount) }),
-    h('span', { class: `mono ${p.netCents > 0 ? 'good' : p.netCents < 0 ? 'bad' : 'muted'}`, text: formatCurrency(p.netCents, true) }),
-    ...(hasBills ? [h('span', { class: `mono ${p.finalCents > 0 ? 'good' : p.finalCents < 0 ? 'bad' : 'muted'}`, text: `→ ${formatCurrency(p.finalCents, true)}` })] : [])))));
+    h('span', { class: 'grow' }, p.name, h('span', { class: 'muted small mono', text: ` · ${formatBuyInCount(p.buyInCount)}` })),
+    amountCol(p.netCents, hasBills ? p.finalCents : undefined)))));
   if (a.guests.length) {
     view.append(header('Not playing'));
     view.append(group(...a.guests.map(g => h('div', { class: 'row standing' },
@@ -558,6 +562,20 @@ function settleView(): HTMLElement {
   view.append(group(h('button', { class: 'row action', on: { click: () => openExpenses() } },
     h('span', { class: 'grow', text: 'Extra expenses (food, drinks…)' }),
     h('span', { class: 'muted mono', text: hasBills ? formatCurrency(a.billsTotalCents) : s.isEnded ? 'None' : 'Add' }), h('span', { class: 'muted', text: '›' }))));
+
+  view.append(header('Settlement options'));
+  view.append(group(
+    h('button', {
+      class: 'row action', attrs: { role: 'switch', 'aria-checked': s.round === true, disabled: s.isEnded },
+      on: { click: () => setRound(!s.round) }
+    }, h('span', { class: 'grow' }, 'Round payments to whole dollars', h('div', { class: 'muted small', text: 'No more 49¢ payments. Everyone’s amounts still add up exactly.' })), h('span', { class: `switch ${s.round ? 'on' : ''}` }, h('i'))),
+    ...(s.share && !s.isDemo ? [
+      field('Note to everyone', textInput(s.note ?? '', setNote, { label: 'Note to everyone watching', fk: 'note' })),
+      h('label', { class: 'row field' }, h('span', { text: 'Final link stays live for' }),
+        h('select', { attrs: { 'aria-label': 'How long the final link stays live after settling' }, on: { change: e => { setFinalTtl(Number((e.target as HTMLSelectElement).value)); toast('Final link time updated'); } } },
+          ...FINAL_TTL_CHOICES.map(c => h('option', { text: c.label, attrs: { value: c.seconds, selected: c.seconds === (s.finalTtl ?? 7 * 86400) } }))))
+    ] : [])));
+  if (s.share && !s.isDemo) view.append(h('div', { class: 'foot', text: 'The note shows at the top of the live link. After you settle, the link stays live for the time chosen above, then it is deleted.' }));
 
   const receipt = () => buildReceipt(s.name, a, s.paid);
   if (a.players.length === 0) return view;

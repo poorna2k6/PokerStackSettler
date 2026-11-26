@@ -162,7 +162,7 @@ async function flush() {
   inFlight = true;
   try {
     const sending = wantTtl;
-    const r = await call<{ expiresAt?: number; ttl?: number; reason?: string }>('PUT', `?code=${share.code}`, { snapshot: shareSnapshot(), ttlSeconds: sending }, share.hostKey);
+    const r = await call<{ expiresAt?: number; ttl?: number; reason?: string }>('PUT', `?code=${share.code}${restoreFlag()}`, { snapshot: shareSnapshot(), ttlSeconds: sending ?? sync.ttl, finalTtlSeconds: state.session.finalTtl }, share.hostKey);
     if (r.status === 200) {
       missCount = 0;
       lastOkAt = Date.now();
@@ -207,6 +207,26 @@ async function flush() {
     if (dirty && sync.phase !== 'offline') schedule();
   }
 }
+
+/**
+ * While the app is open, tell the server every 45 s that the host is still here. This renews the link's lifetime
+ * and, if the server lost the table (temporary storage restarted), puts it back under the same code.
+ */
+/** Ask the server to put a LOST table back only while the link should still be alive; an expired one stays expired. */
+const restoreFlag = () => (sync.expiresAt === undefined || Date.now() < sync.expiresAt ? '&restore=1' : '');
+
+async function heartbeat() {
+  const share = state.session.share;
+  if (!share || state.session.isDemo || inFlight || document.visibilityState !== 'visible' || sync.phase === 'unavailable') return;
+  try {
+    const r = await call<{ expiresAt?: number; ttl?: number }>('PUT', `?code=${share.code}${restoreFlag()}&heartbeat=1`, { snapshot: shareSnapshot(), ttlSeconds: sync.ttl, finalTtlSeconds: state.session.finalTtl }, share.hostKey);
+    if (r.status === 200) {
+      if (r.data?.expiresAt) sync.expiresAt = r.data.expiresAt;
+      if (sync.phase === 'offline') { missCount = 0; setPhase('ok', clock()); }
+    } else if (r.status === 403) handedOver(share.code);
+  } catch { /* the next save or beat will retry */ }
+}
+window.setInterval(heartbeat, 45000);
 
 function schedule() {
   if (!state.session.share || state.session.isDemo) {

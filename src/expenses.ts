@@ -2,7 +2,7 @@
 import { h, haptic, openSheet, confirmSheet, toast } from './dom';
 import { formatCurrency, toCents, MAX_BILLS } from './engine';
 import { audit, checkBill, removeBill, saveBill, state, subscribe } from './state';
-import { group } from './ui';
+import { amountCol, group } from './ui';
 
 const payerName = (b: { payerId?: string; guest?: string }) =>
   (b.payerId && state.session.players.find(p => p.id === b.payerId)?.name) || b.guest || 'Someone else';
@@ -22,15 +22,18 @@ export function openExpenses(onDone?: () => void) {
         bills.length === 0
           ? group(h('div', { class: 'row empty' }, h('span', { text: 'No extra expenses yet.' })))
           : group(
-            ...bills.map(b => h('button', {
-              class: 'row action', attrs: { 'data-fk': `bill:${b.id}`, 'aria-label': `${b.label}, ${formatCurrency(b.cents)}, paid by ${payerName(b)}${locked ? '' : ', edit'}`, disabled: locked },
-              on: { click: () => openBillForm(b.id) }
+            ...bills.map(b => h(locked ? 'div' : 'button', {
+              class: locked ? 'row' : 'row action', attrs: { 'data-fk': `bill:${b.id}`, 'aria-label': `${b.label}, ${formatCurrency(b.cents)}, paid by ${payerName(b)}${locked ? '' : ', edit'}`, disabled: locked },
+              on: locked ? {} : { click: () => openBillForm(b.id) }
             },
               h('span', { class: 'grow' }, h('strong', { text: b.label }), h('div', { class: 'muted small', text: `paid by ${payerName(b)} · ${b.sharedBy?.length ? `shared by ${b.sharedBy.length}` : 'everyone'}` })),
               h('span', { class: 'mono', text: formatCurrency(b.cents) }))),
             h('div', { class: 'row' },
               h('span', { class: 'muted grow', text: 'Total' }),
               h('strong', { class: 'mono', text: formatCurrency(a.billsTotalCents) }))),
+        ...(bills.length ? [h('div', { class: 'section-title' }, h('span', { text: 'Per person: poker → after expenses' })), group(
+          ...a.players.map(p => h('div', { class: 'row' }, h('span', { class: 'grow', text: p.name }), amountCol(p.netCents, p.finalCents))),
+          ...a.guests.map(g => h('div', { class: 'row' }, h('span', { class: 'grow', text: `${g.name} (not playing)` }), amountCol(0, g.finalCents))))] : []),
         ...(locked ? [h('p', { class: 'muted small', text: 'The session is settled and locked. Reopen it on the Table tab to change expenses.' })] : [h('button', { class: 'btn tinted block', text: '＋ Add expense', attrs: { disabled: bills.length >= MAX_BILLS }, on: { click: () => openBillForm() } })]),
         h('button', { class: `btn ${onDone ? 'primary' : 'plain'} block`, text: onDone ? 'Continue' : 'Done', on: { click: () => { close(); onDone?.(); } } }));
     };

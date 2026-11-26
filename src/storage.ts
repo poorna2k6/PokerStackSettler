@@ -63,14 +63,17 @@ export function loadLive(): SessionData | null {
     players,
     paid,
     bills: sanitizeBills(o.bills),
-    log: sanitizeLog(o.log)
+    log: sanitizeLog(o.log),
+    note: typeof o.note === 'string' ? o.note.slice(0, 240) : '',
+    round: o.round === true,
+    finalTtl: typeof o.finalTtl === 'number' ? o.finalTtl : undefined
   };
 }
 
 export const saveLive = (s: SessionData) =>
   write(LIVE_KEY, {
     id: s.id, name: s.name, defaultBuyIn: s.defaultBuyIn, expenseCents: s.expenseCents,
-    isEnded: s.isEnded, isDemo: s.isDemo === true, share: s.share, players: s.players, paid: s.paid, bills: s.bills ?? [], log: s.log ?? []
+    isEnded: s.isEnded, isDemo: s.isDemo === true, share: s.share, players: s.players, paid: s.paid, bills: s.bills ?? [], log: s.log ?? [], note: s.note ?? '', finalTtl: s.finalTtl, round: s.round === true
   });
 
 export function loadVault(): SavedSession[] {

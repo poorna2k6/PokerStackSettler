@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildNotepad, buildReceipt, buyInCount, paidKey, uniqueSessionIds, formatUnit, leaderboard, parseBuyInUnit, sanitizeBuyIn, parseBackup, reconcile, sanitizePlayers, settleNodes, solve,
-  formatCurrency, toCents, splitEvenly, sanitizeBills, MAX_BILL_CENTS, type Player
+  formatCurrency, toCents, splitEvenly, sanitizeBills, roundToDollars, sanitizeSaved, MAX_BILL_CENTS, type Player
 } from './engine';
 
 const P = (id: string, bi: number, co: number): Player => ({ id, name: id, buyInCents: bi, cashOutCents: co });
@@ -390,5 +390,47 @@ describe('expense shared by a chosen list', () => {
     const a = solve([pl('a'), pl('b')], 0, 100, [{ id: '1', label: 'x', cents: 1000, payerId: 'a', sharedBy: ['ghost'] }]);
     expect(a.players.map(p => p.shareCents)).toEqual([500, 500]);
     expect(sanitizeBills([{ cents: 100, guest: 'g', sharedBy: ['a', 'a', 5, ''] }])[0].sharedBy).toEqual(['a']);
+  });
+});
+
+describe('rounding payments to whole dollars', () => {
+  it('keeps the total at zero and every amount within a dollar of the exact one', () => {
+    let seed = 7;
+    const rnd = (n: number) => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; };
+    for (let t = 0; t < 500; t++) {
+      const n = 2 + rnd(10);
+      const nets = Array.from({ length: n - 1 }, () => rnd(20001) - 10000);
+      nets.push(-nets.reduce((a, b) => a + b, 0));
+      const r = roundToDollars(nets);
+      expect(r.reduce((a, b) => a + b, 0)).toBe(0);
+      r.forEach((v, i) => { expect(Math.abs(v % 100)).toBe(0); expect(Math.abs(v - nets[i])).toBeLessThan(100); });
+    }
+  });
+  it('removes tiny payments and still pays everyone their dollar amount', () => {
+    const P2 = (id: string, bi: number, co: number) => ({ id, name: id.toUpperCase(), buyInCents: bi, cashOutCents: co });
+    const players = [P2('a', 10000, 10049), P2('b', 10000, 9951)];
+    const exact = solve(players, 0, 100, []);
+    expect(exact.transfers[0].amountCents).toBe(49);
+    const rounded = solve(players, 0, 100, [], true);
+    expect(rounded.transfers).toHaveLength(0);
+    expect(rounded.isBalanced).toBe(true);
+  });
+  it('does nothing while the chips do not balance', () => {
+    const P2 = (id: string, bi: number, co: number) => ({ id, name: id.toUpperCase(), buyInCents: bi, cashOutCents: co });
+    const a = solve([P2('a', 10000, 20000), P2('b', 10000, 5000)], 0, 100, [], true);
+    expect(a.isBalanced).toBe(false);
+  });
+});
+
+describe('History keeps the whole-dollar choice', () => {
+  it('round-trips through the saved session and the .txt backup', () => {
+    const players = [{ id: 'a', name: 'A', buyInCents: 10000, cashOutCents: 10049 }, { id: 'b', name: 'B', buyInCents: 10000, cashOutCents: 9951 }];
+    const saved = sanitizeSaved({ id: 's', name: 'G', defaultBuyIn: 100, expenseCents: 0, players, round: true });
+    expect(saved?.round).toBe(true);
+    expect(sanitizeSaved({ id: 's', name: 'G', players })?.round).toBe(false);
+    const text = buildNotepad({ id: 's', name: 'G', defaultBuyIn: 100, expenseCents: 0, isEnded: false, paid: {}, players, round: true });
+    expect(text).toContain('0 transfers');
+    const back = parseBackup(text);
+    expect(back?.kind === 'session' && back.session.round).toBe(true);
   });
 });

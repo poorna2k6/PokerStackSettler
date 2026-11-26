@@ -76,7 +76,7 @@ export function commit() {
   listeners.forEach(fn => fn());
 }
 
-export const audit = () => solve(state.session.players, state.session.expenseCents, state.session.defaultBuyIn, state.session.bills ?? []);
+export const audit = () => solve(state.session.players, state.session.expenseCents, state.session.defaultBuyIn, state.session.bills ?? [], state.session.round === true);
 export { paidKey } from './engine';
 
 type Share = NonNullable<SessionData['share']>;
@@ -96,16 +96,20 @@ function replaceSession(next: SessionData) {
  * Becoming the host of a table someone else was running. The table that was open on this phone is kept in
  * History first, so nothing is lost.
  */
-export function adoptSharedSession(s: { name: string; defaultBuyIn: number; expenseCents: number; isEnded: boolean; players: Player[]; paid: Record<string, boolean>; bills?: Bill[]; log?: { t: number; m: string }[] }, share: NonNullable<SessionData['share']>) {
+export function adoptSharedSession(s: { name: string; defaultBuyIn: number; expenseCents: number; isEnded: boolean; players: Player[]; paid: Record<string, boolean>; bills?: Bill[]; log?: { t: number; m: string }[]; note?: string; round?: boolean }, share: NonNullable<SessionData['share']>) {
   const cur = state.session;
   if (!cur.isDemo && cur.players.length > 0 && cur.share?.code !== share.code) saveToHistory('Saved before taking over a table');
   replaceSession({
     id: uid('sess'), name: s.name, defaultBuyIn: s.defaultBuyIn, expenseCents: s.expenseCents, isEnded: s.isEnded,
-    isDemo: false, share, players: s.players.map(p => ({ ...p })), paid: { ...s.paid }, bills: (s.bills ?? []).map(b => ({ ...b })), log: (s.log ?? []).map(e => ({ ...e }))
+    isDemo: false, share, players: s.players.map(p => ({ ...p })), paid: { ...s.paid }, bills: (s.bills ?? []).map(b => ({ ...b })), log: (s.log ?? []).map(e => ({ ...e })), note: s.note ?? '', round: s.round === true
   });
   state.tab = 'table';
   commit();
 }
+
+export function setRound(on: boolean) { state.session.round = on; state.session.paid = {}; commit(); }
+export function setNote(v: string) { state.session.note = v.slice(0, 240); commit(); }
+export function setFinalTtl(sec: number) { state.session.finalTtl = sec; commit(); }
 
 export function setShare(share: SessionData['share']) {
   state.session.share = share;
@@ -117,7 +121,7 @@ export function shareSnapshot() {
   const s = state.session;
   return {
     name: s.name, defaultBuyIn: s.defaultBuyIn, expenseCents: s.expenseCents,
-    isEnded: s.isEnded, players: s.players, paid: s.paid, bills: s.bills ?? [], log: s.log ?? []
+    isEnded: s.isEnded, players: s.players, paid: s.paid, bills: s.bills ?? [], log: s.log ?? [], note: s.note ?? '', round: s.round === true
   };
 }
 
@@ -256,7 +260,8 @@ function snapshot(status: string): SavedSession {
     defaultBuyIn: s.defaultBuyIn, expenseCents: s.expenseCents,
     players: s.players.map(p => ({ ...p })),
     paid: { ...s.paid },
-    bills: (s.bills ?? []).map(b => ({ ...b }))
+    bills: (s.bills ?? []).map(b => ({ ...b })),
+    round: s.round === true
   };
 }
 
@@ -304,7 +309,7 @@ export function loadSaved(id: string) {
   if (!s) return;
   replaceSession({
     id: s.id, name: s.name, defaultBuyIn: s.defaultBuyIn, expenseCents: s.expenseCents,
-    isEnded: s.status.startsWith('Completed'), isDemo: false, players: s.players.map(p => ({ ...p })), paid: { ...(s.paid ?? {}) }, bills: (s.bills ?? []).map(b => ({ ...b }))
+    isEnded: s.status.startsWith('Completed'), isDemo: false, players: s.players.map(p => ({ ...p })), paid: { ...(s.paid ?? {}) }, bills: (s.bills ?? []).map(b => ({ ...b })), round: s.round === true
   });
   state.tab = 'table';
   commit();
@@ -340,7 +345,7 @@ export function importBackup(text: string): string | null {
   const s = parsed.session;
   replaceSession({
     id: s.id, name: s.name, defaultBuyIn: s.defaultBuyIn, expenseCents: s.expenseCents,
-    isEnded: false, isDemo: false, players: s.players, paid: {}, bills: s.bills ?? []
+    isEnded: false, isDemo: false, players: s.players, paid: {}, bills: s.bills ?? [], round: s.round === true
   });
   state.tab = 'table';
   commit();

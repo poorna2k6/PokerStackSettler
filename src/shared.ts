@@ -10,6 +10,10 @@ export interface SharedSnapshot {
   paid: Record<string, boolean>;
   bills?: Bill[];
   log?: LogEntry[];
+  /** a message from the host to everyone watching */
+  note?: string;
+  /** transfers are rounded to whole dollars */
+  round?: boolean;
   /** set by the server on every write */
   updatedAt: number;
 }
@@ -36,6 +40,17 @@ export const SHARE_TTL_CHOICES: { seconds: number; label: string }[] = [
   { seconds: 30 * 24 * 3600, label: '30 days' },
   { seconds: 90 * 24 * 3600, label: 'Until I stop it (90-day safety limit)' }
 ];
+/** How long the FINAL (settled) link stays alive, counted from the moment the host settles; no renewing after that. */
+export const FINAL_TTL_CHOICES: { seconds: number; label: string }[] = [
+  { seconds: 24 * 3600, label: '24 hours' },
+  { seconds: 3 * 24 * 3600, label: '3 days' },
+  { seconds: 7 * 24 * 3600, label: '7 days' },
+  { seconds: 30 * 24 * 3600, label: '30 days' }
+];
+export const pickFinalTtl = (raw: unknown, fallback = 7 * 24 * 3600) =>
+  FINAL_TTL_CHOICES.some(c => c.seconds === raw) ? (raw as number) : fallback;
+export const MAX_NOTE = 240;
+
 /** Only a listed lifetime is accepted from a client; anything else falls back to `fallback`. */
 export const pickTtl = (raw: unknown, fallback = SHARE_TTL_SECONDS) =>
   SHARE_TTL_CHOICES.some(c => c.seconds === raw) ? (raw as number) : fallback;
@@ -63,6 +78,8 @@ export function sanitizeSnapshot(raw: unknown, now = Date.now()): SharedSnapshot
     paid: sanitizePaid(o.paid),
     bills: sanitizeBills(o.bills),
     log: sanitizeLog(o.log),
+    note: typeof o.note === 'string' ? o.note.trim().slice(0, MAX_NOTE) : '',
+    round: o.round === true,
     updatedAt: now
   };
 }
