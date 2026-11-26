@@ -551,10 +551,19 @@ function unconfiguredStore() {
   };
   return { kind: "unconfigured", get: fail, set: fail, del: fail, setIf: fail, delIf: fail, incr: fail };
 }
+function redisCreds(env) {
+  const pick = (suffixes) => {
+    for (const s of suffixes) if (env[s]) return env[s];
+    for (const [k, v] of Object.entries(env)) if (v && !/READ_ONLY/i.test(k) && suffixes.some((s) => k.endsWith(`_${s}`))) return v;
+    return void 0;
+  };
+  const url = pick(["UPSTASH_REDIS_REST_URL", "KV_REST_API_URL"]);
+  const token = pick(["UPSTASH_REDIS_REST_TOKEN", "KV_REST_API_TOKEN"]);
+  return url && token && /^https:\/\//.test(url) ? { url, token } : null;
+}
 function pickStore(env, fetchImpl = fetch) {
-  const url = env.UPSTASH_REDIS_REST_URL ?? env.KV_REST_API_URL;
-  const token = env.UPSTASH_REDIS_REST_TOKEN ?? env.KV_REST_API_TOKEN;
-  if (url && token) return upstash(url, token, fetchImpl);
+  const creds = redisCreds(env);
+  if (creds) return upstash(creds.url, creds.token, fetchImpl);
   if (env.VERCEL && env.ALLOW_MEMORY_STORE === "0") {
     console.error("[share] Sharing storage is NOT configured: connect Upstash Redis to this Vercel project (Storage tab) and redeploy. Sharing is disabled until then.");
     return unconfiguredStore();
@@ -590,7 +599,7 @@ async function handler(req, res) {
     body: req.body,
     ip: (headers["x-forwarded-for"] ?? "").split(",")[0].trim() || req.socket.remoteAddress || "unknown"
   };
-  const secret = process.env.SHARE_SECRET ?? process.env.UPSTASH_REDIS_REST_TOKEN ?? process.env.KV_REST_API_TOKEN;
+  const secret = process.env.SHARE_SECRET ?? redisCreds(process.env)?.token;
   const out = await handleShare(apiReq, getStore(), Date.now(), void 0, secret);
   res.statusCode = out.status;
   res.setHeader("Content-Type", "application/json");

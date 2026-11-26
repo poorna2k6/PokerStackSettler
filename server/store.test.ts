@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { pickStore, upstash } from './store';
+import { redisCreds, pickStore, upstash } from './store';
 
 describe('pickStore', () => {
   afterEach(() => vi.restoreAllMocks());
@@ -77,5 +77,22 @@ describe('compare-and-set', () => {
     expect(calls[2].slice(3)).toEqual(['share:A', '{"a":2}']);
     const lost = (async () => ({ ok: true, json: async () => ({ result: 0 }) }) as unknown as Response) as unknown as typeof fetch;
     expect(await upstash('https://redis.example', 't', lost).setIf('k', 'v', 60, 'x')).toBe(false);
+  });
+});
+
+describe('redisCreds', () => {
+  it('accepts the plain names, a custom prefix, and never a read-only token', () => {
+    expect(redisCreds({ KV_REST_API_URL: 'https://a', KV_REST_API_TOKEN: 't' })).toEqual({ url: 'https://a', token: 't' });
+    expect(redisCreds({ UPSTASH_REDIS_REST_URL: 'https://u', UPSTASH_REDIS_REST_TOKEN: 'ut', KV_REST_API_URL: 'https://a', KV_REST_API_TOKEN: 't' })).toEqual({ url: 'https://u', token: 'ut' });
+    const prefixed = {
+      POKER_REDIS_KV_REST_API_READ_ONLY_TOKEN: 'readonly',
+      POKER_REDIS_KV_REST_API_TOKEN: 'rw',
+      POKER_REDIS_KV_REST_API_URL: 'https://x.upstash.io',
+      POKER_REDIS_REDIS_URL: 'rediss://default:rw@x.upstash.io:6379'
+    };
+    expect(redisCreds(prefixed)).toEqual({ url: 'https://x.upstash.io', token: 'rw' });
+    expect(redisCreds({ POKER_REDIS_KV_REST_API_READ_ONLY_TOKEN: 'ro', POKER_REDIS_KV_REST_API_URL: 'https://x' })).toBeNull();
+    expect(redisCreds({ KV_REST_API_URL: 'http://insecure', KV_REST_API_TOKEN: 't' })).toBeNull();
+    expect(pickStore({ ...prefixed, VERCEL: '1' }).kind).toBe('redis');
   });
 });
