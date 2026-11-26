@@ -499,10 +499,11 @@ function pickStore(env, fetchImpl = fetch) {
   const url = env.UPSTASH_REDIS_REST_URL ?? env.KV_REST_API_URL;
   const token = env.UPSTASH_REDIS_REST_TOKEN ?? env.KV_REST_API_TOKEN;
   if (url && token) return upstash(url, token, fetchImpl);
-  if (env.VERCEL && env.ALLOW_MEMORY_STORE !== "1") {
+  if (env.VERCEL && env.ALLOW_MEMORY_STORE === "0") {
     console.error("[share] Sharing storage is NOT configured: connect Upstash Redis to this Vercel project (Storage tab) and redeploy. Sharing is disabled until then.");
     return unconfiguredStore();
   }
+  if (env.VERCEL) console.error("[share] No Redis connected: using temporary memory storage. Links may vanish. Connect Upstash Redis (Storage tab) and redeploy.");
   return memoryStore();
 }
 var cached;
