@@ -127,6 +127,14 @@ var SHARE_TTL_CHOICES = [
   { seconds: 30 * 24 * 3600, label: "30 days" },
   { seconds: 90 * 24 * 3600, label: "Until I stop it (90-day safety limit)" }
 ];
+var FINAL_TTL_CHOICES = [
+  { seconds: 24 * 3600, label: "24 hours" },
+  { seconds: 3 * 24 * 3600, label: "3 days" },
+  { seconds: 7 * 24 * 3600, label: "7 days" },
+  { seconds: 30 * 24 * 3600, label: "30 days" }
+];
+var pickFinalTtl = (raw, fallback = 7 * 24 * 3600) => FINAL_TTL_CHOICES.some((c) => c.seconds === raw) ? raw : fallback;
+var MAX_NOTE = 240;
 var pickTtl = (raw, fallback = SHARE_TTL_SECONDS) => SHARE_TTL_CHOICES.some((c) => c.seconds === raw) ? raw : fallback;
 function normalizeCode(raw) {
   const code = String(raw ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
@@ -147,6 +155,8 @@ function sanitizeSnapshot(raw, now = Date.now()) {
     paid: sanitizePaid(o.paid),
     bills: sanitizeBills(o.bills),
     log: sanitizeLog(o.log),
+    note: typeof o.note === "string" ? o.note.trim().slice(0, MAX_NOTE) : "",
+    round: o.round === true,
     updatedAt: now
   };
 }
@@ -159,6 +169,7 @@ var StorageNotConfigured = class extends Error {
   }
 };
 var ttlOf = (rec) => pickTtl(rec?.ttl);
+var untilOf = (rec, now) => rec.settledAt && rec.finalTtl ? rec.settledAt + rec.finalTtl * 1e3 : now + ttlOf(rec) * 1e3;
 var MAX_BODY_BYTES = 32 * 1024;
 var LIMITS = {
   create: { max: 10, window: 3600 },
@@ -225,8 +236,12 @@ async function mutate(store, code, now, fn) {
       continue;
     }
     if (!step.next) return step.res;
-    const ttl = ttlOf(step.next);
+    let ttl = ttlOf(step.next);
     step.next.expiresAt = now + ttl * 1e3;
+    if (step.next.settledAt && step.next.finalTtl) {
+      step.next.expiresAt = step.next.settledAt + step.next.finalTtl * 1e3;
+      ttl = Math.max(1, Math.ceil((step.next.expiresAt - now) / 1e3));
+    }
     if (await store.setIf(key, JSON.stringify(step.next), ttl, raw)) return step.res;
   }
   return err(409, "The table is busy \u2014 try again");
@@ -292,12 +307,43 @@ async function handleShare(req, store, now = Date.now(), limits = LIMITS) {
         if (await limited(store, `rl:write:${code}`, limits.write)) return err(429, "Too many updates");
         const snapshot = sanitizeSnapshot(req.body?.snapshot, now);
         if (!snapshot) return err(400, "Invalid session");
+        const heartbeat = req.query.heartbeat === "1";
+        const restore = req.query.restore === "1" && typeof hostKey === "string" && hostKey.length >= 16 && hostKey.length <= 200;
+        const askedTtl = req.body?.ttlSeconds;
+        if (restore && await store.get(`share:${code}`) === null && await store.get(`tomb:${code}`) === null) {
+          if (await limited(store, `rl:create:${ip}`, limits.create)) return err(429, "Too many new shares, try again later");
+          const ttl = pickTtl(askedTtl);
+          const rec = { keyHash: sha256(hostKey), snapshot, rev: 1, createdAt: now, epoch: 1, ttl, expiresAt: now + ttl * 1e3 };
+          let life = ttl;
+          if (snapshot.isEnded) {
+            rec.settledAt = now;
+            rec.finalTtl = pickFinalTtl(req.body?.finalTtlSeconds);
+            rec.expiresAt = now + rec.finalTtl * 1e3;
+            life = rec.finalTtl;
+          }
+          if (await store.setIf(`share:${code}`, JSON.stringify(rec), life, null)) {
+            return json(200, { rev: 1, epoch: 1, ttl, expiresAt: rec.expiresAt, restored: true });
+          }
+        }
         return mutate(store, code, now, async (rec) => {
           if (!rec) return { res: await gone(store, code) };
           if (!keyMatches(hostKey, rec.keyHash)) return { res: err(403, "Only the host can change this table") };
+          if (heartbeat) {
+            const kept = { ...rec };
+            return { next: kept, res: json(200, { rev: kept.rev, epoch: kept.epoch ?? 1, ttl: ttlOf(kept), expiresAt: untilOf(kept, now) }) };
+          }
           const next = { ...rec, snapshot, rev: rec.rev + 1 };
+          const askedFinal = req.body?.finalTtlSeconds;
+          if (snapshot.isEnded) {
+            next.settledAt = rec.settledAt ?? now;
+            next.finalTtl = pickFinalTtl(askedFinal, rec.finalTtl);
+          } else {
+            delete next.settledAt;
+            delete next.finalTtl;
+          }
           next.ttl = pickTtl(req.body?.ttlSeconds, ttlOf(rec));
-          return { next, res: json(200, { rev: next.rev, epoch: next.epoch ?? 1, ttl: next.ttl, expiresAt: now + next.ttl * 1e3 }) };
+          const until = next.settledAt && next.finalTtl ? next.settledAt + next.finalTtl * 1e3 : now + next.ttl * 1e3;
+          return { next, res: json(200, { rev: next.rev, epoch: next.epoch ?? 1, ttl: next.ttl, finalTtl: next.finalTtl, expiresAt: until }) };
         });
       }
       return mutate(store, code, now, async (rec) => {

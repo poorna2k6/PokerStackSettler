@@ -13,6 +13,14 @@ export function kpi(label: string, value: string, sub?: string, tone = '') {
     sub ? h('div', { class: 'kpi-sub mono', text: sub }) : null);
 }
 
+/** Right-hand amount of a standings row: the poker result, and under it the result after food & drinks. */
+export function amountCol(net: number, final?: number) {
+  const tone = (v: number) => (v > 0 ? 'good' : v < 0 ? 'bad' : 'muted');
+  return h('span', { class: 'amt-col' },
+    h('span', { class: `mono ${tone(net)}`, text: formatCurrency(net, true) }),
+    final === undefined ? null : h('span', { class: `mono small ${tone(final)}`, text: `→ ${formatCurrency(final, true)}` }));
+}
+
 export const SUITS = ['♠', '♥', '♦', '♣'];
 export const initial = (name: string) => (name.trim().match(/[\p{L}\p{N}]/u)?.[0] ?? '?').toUpperCase();
 

@@ -168,6 +168,64 @@ describe('expiry and abuse limits', () => {
     expect(body.length).toBeLessThan(0.9 * 32 * 1024 * 3); // sanity: our client payload stays reasonable
   });
 
+  it('puts a lost table back under the same code when the host saves, but never one that was stopped', async () => {
+    const { call, store } = setup();
+    const { data } = await create(call);
+    const put = (key: string, q: Record<string, string> = {}) => call(req('PUT', { query: { code: data.code, restore: '1', ...q }, headers: { 'x-host-key': key }, body: { snapshot: snap({ name: 'Back' }) } }));
+    await store.del(`share:${data.code}`); // the server forgot it (temporary storage restarted)
+    const r = await put(data.hostKey);
+    expect(r.status).toBe(200);
+    expect((r.body as { restored?: boolean }).restored).toBe(true);
+    const got = (await call(req('GET', { query: { code: data.code } }))).body as { snapshot: { name: string } };
+    expect(got.snapshot.name).toBe('Back');
+    expect((await put('someone-elses-key-0123456789')).status).toBe(403); // the restored table belongs to the original key
+    // deliberately stopped: stays stopped
+    expect((await call(req('DELETE', { query: { code: data.code }, headers: { 'x-host-key': data.hostKey } }))).status).toBe(200);
+    expect((await put(data.hostKey)).status).toBe(404);
+    // without the restore flag a missing table is just 404
+    const other = (await create(call)).data;
+    await store.del(`share:${other.code}`);
+    expect((await call(req('PUT', { query: { code: other.code }, headers: { 'x-host-key': other.hostKey }, body: { snapshot: snap() } }))).status).toBe(404);
+  });
+
+  it('a heartbeat renews the lifetime without changing the table or its revision', async () => {
+    const { call, clock } = setup();
+    const { data } = await create(call);
+    const day = 24 * 3600 * 1000;
+    clock.advance(6 * day);
+    const hb = await call(req('PUT', { query: { code: data.code, heartbeat: '1' }, headers: { 'x-host-key': data.hostKey }, body: { snapshot: snap({ name: 'ignored' }) } }));
+    expect((hb.body as { rev: number }).rev).toBe(1);
+    clock.advance(6 * day);
+    const got = await call(req('GET', { query: { code: data.code } }));
+    expect(got.status).toBe(200); // would have expired without the heartbeat
+    expect((got.body as { snapshot: { name: string } }).snapshot.name).toBe('Fri');
+  });
+
+  it('a settled table lives for the chosen final time from the moment of settling, and saves do not extend it', async () => {
+    const { call, clock } = setup();
+    const { data } = await create(call);
+    const day = 24 * 3600 * 1000;
+    const put = (body: Record<string, unknown>, q: Record<string, string> = {}) => call(req('PUT', { query: { code: data.code, ...q }, headers: { 'x-host-key': data.hostKey }, body }));
+    clock.advance(2 * day);
+    const settle = await put({ snapshot: snap({ isEnded: true }), finalTtlSeconds: 3 * 86400 });
+    expect((settle.body as { finalTtl: number }).finalTtl).toBe(3 * 86400);
+    clock.advance(2 * day);
+    await put({ snapshot: snap({ isEnded: true, paid: { 'a->b:100': true } }), finalTtlSeconds: 3 * 86400 }); // mark paid: no extension
+    await put({ snapshot: snap({ isEnded: true }) }, { heartbeat: '1' }); // heartbeat: no extension
+    expect((await call(req('GET', { query: { code: data.code } }))).status).toBe(200); // day 4 < settled day 2 + 3
+    clock.advance(1.5 * day);
+    expect((await call(req('GET', { query: { code: data.code } }))).status).toBe(404); // past settle + 3 days
+  });
+
+  it('a hostile note is trimmed and finalTtl only accepts the allowed values', async () => {
+    const { call } = setup();
+    const { data } = await create(call, { snapshot: snap({ note: `  ${'n'.repeat(1000)}  ` }) } as never);
+    const got = (await call(req('GET', { query: { code: data.code } }))).body as { snapshot: { note: string } };
+    expect(got.snapshot.note.length).toBe(240);
+    const r = await call(req('PUT', { query: { code: data.code }, headers: { 'x-host-key': data.hostKey }, body: { snapshot: snap({ isEnded: true }), finalTtlSeconds: 99 } }));
+    expect((r.body as { finalTtl: number }).finalTtl).toBe(7 * 86400);
+  });
+
   it('throttles code guessing per IP', async () => {
     const { call } = setup();
     let last = 0;

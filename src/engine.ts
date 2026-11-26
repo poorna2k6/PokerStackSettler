@@ -233,11 +233,24 @@ export function splitEvenly(total: number, n: number): number[] {
   return Array.from({ length: n }, (_, i) => base + (i < extra ? 1 : 0));
 }
 
+/**
+ * Rounds everyone's amount to whole dollars while keeping the total at exactly zero: everyone goes down to the
+ * dollar, then the missing dollars go to the people who lost the most cents by rounding down.
+ */
+export function roundToDollars(nets: number[]): number[] {
+  const floor = nets.map(n => Math.floor(n / 100) * 100);
+  let units = Math.round(-floor.reduce((a, b) => a + b, 0) / 100);
+  const order = nets.map((n, i) => ({ i, rem: n - floor[i] })).sort((a, b) => b.rem - a.rem || a.i - b.i);
+  for (const o of order) { if (units <= 0) break; floor[o.i] += 100; units--; }
+  return floor.map(v => v + 0); // turns -0 into 0
+}
+
 export function solve(
   players: Player[],
   expenseCents = 0,
   stdBuyInDollars = 100,
-  bills: Bill[] = []
+  bills: Bill[] = [],
+  roundPayments = false
 ): Audit {
   const unit = unitCentsFor(stdBuyInDollars);
   const clean: AuditPlayer[] = players.map(p => {
@@ -295,12 +308,17 @@ export function solve(
   const totalAccountedCents = totalPlayerCashOutCents + validExpense;
   const discrepancyCents = totalAccountedCents - totalBuyInCents;
 
+  const isBalancedChips = (ps: AuditPlayer[], exp: number) => ps.reduce((a, p) => a + p.cashOutCents - p.buyInCents, 0) + exp === 0;
   const nodes: Node[] = [
     ...clean.map(p => ({ id: p.id, name: p.name, net: p.finalCents, isHouse: false })),
     ...guests.map(g => ({ id: g.id, name: g.name, net: g.finalCents, isHouse: false }))
   ];
   if (validExpense > 0) {
     nodes.push({ id: HOUSE_ID, name: 'House / Expense Pot', net: validExpense, isHouse: true });
+  }
+  if (roundPayments && isBalancedChips(clean, validExpense)) {
+    const r = roundToDollars(nodes.map(n => n.net));
+    nodes.forEach((n, i) => { n.net = r[i]; });
   }
 
   return {
@@ -464,6 +482,12 @@ export interface SessionData {
   bills?: Bill[];
   /** the last few things that happened at the table, newest last (shown to viewers) */
   log?: LogEntry[];
+  /** round who-pays-whom amounts to whole dollars */
+  round?: boolean;
+  /** a message from the host to everyone watching the live link */
+  note?: string;
+  /** how long the link stays alive after settling (seconds) */
+  finalTtl?: number;
 }
 
 export interface LogEntry { t: number; m: string }
@@ -572,7 +596,7 @@ export function parseBackup(text: string): ParsedBackup | null {
 
 export function buildNotepad(s: SavedSession | (SessionData & { timestamp?: string; status?: string })): string {
   const expense = 'expenseCents' in s ? s.expenseCents : 0;
-  const audit = solve(s.players, expense, s.defaultBuyIn, s.bills ?? []);
+  const audit = solve(s.players, expense, s.defaultBuyIn, s.bills ?? [], 'round' in s && s.round === true);
   const stamp =
     ('timestamp' in s && s.timestamp) || new Date().toISOString().slice(0, 16).replace('T', ' ');
   const status =

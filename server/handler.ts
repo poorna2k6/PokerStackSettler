@@ -2,7 +2,7 @@
 // middleware and the unit tests all call this, so the permission rules live in exactly one place.
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import {
-  CODE_ALPHABET, CODE_LENGTH, KEY_HASH_RE, OFFER_TTL_MS, SHARE_TTL_SECONDS, normalizeCode, pickTtl, sanitizeSnapshot,
+  CODE_ALPHABET, CODE_LENGTH, KEY_HASH_RE, OFFER_TTL_MS, SHARE_TTL_SECONDS, normalizeCode, pickFinalTtl, pickTtl, sanitizeSnapshot,
   type PublicOffer, type SharedSnapshot
 } from '../src/shared';
 
@@ -54,10 +54,14 @@ interface Record_ {
   expiresAt?: number;
   /** the host's chosen rolling lifetime in seconds (missing on old records = 7 days) */
   ttl?: number;
+  /** set when the host settles: the link then lives for finalTtl seconds from this moment and is no longer renewed */
+  settledAt?: number;
+  finalTtl?: number;
   offer?: Offer;
 }
 
 const ttlOf = (rec: { ttl?: number } | null | undefined) => pickTtl(rec?.ttl);
+const untilOf = (rec: Record_, now: number) => (rec.settledAt && rec.finalTtl ? rec.settledAt + rec.finalTtl * 1000 : now + ttlOf(rec) * 1000);
 
 export const MAX_BODY_BYTES = 32 * 1024;
 export const LIMITS = {
@@ -132,8 +136,13 @@ async function mutate(
       continue;
     }
     if (!step.next) return step.res;
-    const ttl = ttlOf(step.next);
+    let ttl = ttlOf(step.next);
     step.next.expiresAt = now + ttl * 1000;
+    if (step.next.settledAt && step.next.finalTtl) {
+      // a settled table has a fixed end of life: it is not extended by later saves, heartbeats or hand-overs
+      step.next.expiresAt = step.next.settledAt + step.next.finalTtl * 1000;
+      ttl = Math.max(1, Math.ceil((step.next.expiresAt - now) / 1000));
+    }
     if (await store.setIf(key, JSON.stringify(step.next), ttl, raw)) return step.res;
   }
   return err(409, 'The table is busy — try again');
@@ -209,13 +218,44 @@ export async function handleShare(req: ApiRequest, store: Store, now = Date.now(
         if (await limited(store, `rl:write:${code}`, limits.write)) return err(429, 'Too many updates');
         const snapshot = sanitizeSnapshot((req.body as { snapshot?: unknown } | null)?.snapshot, now);
         if (!snapshot) return err(400, 'Invalid session');
+        const heartbeat = req.query.heartbeat === '1';
+        const restore = req.query.restore === '1' && typeof hostKey === 'string' && hostKey.length >= 16 && hostKey.length <= 200;
+        const askedTtl = (req.body as { ttlSeconds?: unknown } | null)?.ttlSeconds;
+        if (restore && (await store.get(`share:${code}`)) === null && (await store.get(`tomb:${code}`)) === null) {
+          // The server lost this table (e.g. temporary storage restarted) but the host's phone still has it: put it back
+          // under the SAME code and key. A table the host deliberately stopped (tombstone) is never brought back.
+          if (await limited(store, `rl:create:${ip}`, limits.create)) return err(429, 'Too many new shares, try again later');
+          const ttl = pickTtl(askedTtl);
+          const rec: Record_ = { keyHash: sha256(hostKey as string), snapshot, rev: 1, createdAt: now, epoch: 1, ttl, expiresAt: now + ttl * 1000 };
+          let life = ttl;
+          if (snapshot.isEnded) {
+            rec.settledAt = now;
+            rec.finalTtl = pickFinalTtl((req.body as { finalTtlSeconds?: unknown } | null)?.finalTtlSeconds);
+            rec.expiresAt = now + rec.finalTtl * 1000;
+            life = rec.finalTtl;
+          }
+          if (await store.setIf(`share:${code}`, JSON.stringify(rec), life, null)) {
+            return json(200, { rev: 1, epoch: 1, ttl, expiresAt: rec.expiresAt, restored: true });
+          }
+        }
         return mutate(store, code, now, async rec => {
           if (!rec) return { res: await gone(store, code) };
           if (!keyMatches(hostKey, rec.keyHash)) return { res: err(403, 'Only the host can change this table') };
+          // A heartbeat only says "the host's app is still open": it renews the lifetime and changes nothing else.
+          if (heartbeat) {
+            const kept: Record_ = { ...rec };
+            return { next: kept, res: json(200, { rev: kept.rev, epoch: kept.epoch ?? 1, ttl: ttlOf(kept), expiresAt: untilOf(kept, now) }) };
+          }
           const next: Record_ = { ...rec, snapshot, rev: rec.rev + 1 };
+          const askedFinal = (req.body as { finalTtlSeconds?: unknown } | null)?.finalTtlSeconds;
+          if (snapshot.isEnded) {
+            next.settledAt = rec.settledAt ?? now; // the clock starts the first time it is settled
+            next.finalTtl = pickFinalTtl(askedFinal, rec.finalTtl);
+          } else { delete next.settledAt; delete next.finalTtl; } // reopened: back to a rolling lifetime
           // The host may change the lifetime later ("Extend"); only a listed value counts, otherwise it is kept.
           next.ttl = pickTtl((req.body as { ttlSeconds?: unknown } | null)?.ttlSeconds, ttlOf(rec));
-          return { next, res: json(200, { rev: next.rev, epoch: next.epoch ?? 1, ttl: next.ttl, expiresAt: now + next.ttl * 1000 }) };
+          const until = next.settledAt && next.finalTtl ? next.settledAt + next.finalTtl * 1000 : now + next.ttl * 1000;
+          return { next, res: json(200, { rev: next.rev, epoch: next.epoch ?? 1, ttl: next.ttl, finalTtl: next.finalTtl, expiresAt: until }) };
         });
       }
       return mutate(store, code, now, async rec => {

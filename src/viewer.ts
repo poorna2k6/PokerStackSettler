@@ -7,7 +7,7 @@ import { formatBuyInCount, formatCurrency, formatUnit, paidKey, solve } from './
 import { makeHostKey } from './keys';
 import { formatCode, normalizeCode, type PublicOffer, type SharedSnapshot } from './shared';
 import { THEMES, loadTheme } from './storage';
-import { MAX_SEATS, avatar, chipStack, group, header, kpi, ovalTable } from './ui';
+import { MAX_SEATS, amountCol, avatar, chipStack, group, header, kpi, ovalTable } from './ui';
 
 const POLL_MS = 3000;
 const THEME_COLORS: Record<(typeof THEMES)[number], string> = { midnight: '#000000', felt: '#0a3d2a', ocean: '#06182c', light: '#f2f2f7' };
@@ -117,7 +117,7 @@ export function mountViewer(rawCode: string) {
       const stopped = goneReason === 'stopped';
       return [
         group(h('div', { class: 'row empty', attrs: { role: 'alert' } }, h('span', {
-          text: stopped ? 'The host stopped sharing this table.' : 'This link has expired or isn’t valid any more. Ask the host for a new link.'
+          text: stopped ? 'The host stopped sharing this table.' : 'Can’t find this table right now — waiting for the host to reconnect. If it doesn’t come back, ask the host for a new link.'
         }))),
         h('button', { class: 'btn tinted block slim', text: 'Try again', on: { click: () => { phase = 'loading'; miss404 = 0; render(); void poll(); } } })
       ];
@@ -128,13 +128,14 @@ export function mountViewer(rawCode: string) {
     if (!snap) {
       return [group(h('div', { class: 'row empty' }, h('span', { text: phase === 'offline' ? 'Can’t reach the server — retrying…' : 'Loading the table…' })))];
     }
-    const a = solve(snap.players, snap.expenseCents, snap.defaultBuyIn, snap.bills ?? []);
+    const a = solve(snap.players, snap.expenseCents, snap.defaultBuyIn, snap.bills ?? [], snap.round === true);
     const out: Node[] = [
       h('div', { class: 'demo-card view-only' },
         h('div', { class: 'grow' }, h('strong', { text: '👀 View only' }), h('span', { class: 'small', text: ' — only the host can make changes' })))
     ];
     const ob = offerBanner();
     if (ob) out.push(ob);
+    if (snap.note) out.push(h('div', { class: 'note-card', attrs: { role: 'status' } }, h('strong', { text: '📝 Note from the host' }), h('span', { class: 'pre', text: snap.note })));
     out.push(h('button', { class: 'btn tinted block slim', text: '🃏 New to poker? How hands rank', on: { click: openHandsSheet } }));
     out.push(h('div', { class: 'kpis' },
       kpi('Players', String(a.players.length)),
@@ -209,10 +210,8 @@ export function mountViewer(rawCode: string) {
       out.push(group(...[...a.players].sort((x, y) => y.netCents - x.netCents).map((p, i) =>
         h('div', { class: `row standing ${i === 0 && p.netCents > 0 ? 'gold' : ''} ${p.id === meId ? 'me' : ''}` },
           h('span', { class: 'rank', text: i === 0 && p.netCents > 0 ? '🏆' : String(i + 1) }),
-          h('span', { class: 'grow', text: p.name }),
-          h('span', { class: 'muted mono', text: formatBuyInCount(p.buyInCount) }),
-          h('span', { class: `mono ${p.netCents > 0 ? 'good' : p.netCents < 0 ? 'bad' : 'muted'}`, text: formatCurrency(p.netCents, true) }),
-          ...(a.billsTotalCents > 0 ? [h('span', { class: `mono ${p.finalCents > 0 ? 'good' : p.finalCents < 0 ? 'bad' : 'muted'}`, text: `→ ${formatCurrency(p.finalCents, true)}` })] : [])))));
+          h('span', { class: 'grow' }, p.name, h('span', { class: 'muted small mono', text: ` · ${formatBuyInCount(p.buyInCount)}` })),
+          amountCol(p.netCents, a.billsTotalCents > 0 ? p.finalCents : undefined)))));
       if (a.guests.length) out.push(group(...a.guests.map(g => h('div', { class: 'row standing' }, h('span', { class: 'rank', text: '🍕' }), h('span', { class: 'grow', text: `${g.name} (not playing)` }), h('span', { class: `mono ${g.finalCents > 0 ? 'good' : g.finalCents < 0 ? 'bad' : 'muted'}`, text: formatCurrency(g.finalCents, true) })))));
     }
     const recent = (snap.log ?? []).slice(-8).reverse();
@@ -334,7 +333,12 @@ export function mountViewer(rawCode: string) {
         const body = (await res.json().catch(() => ({}))) as { reason?: string };
         goneReason = body.reason === 'stopped' ? 'stopped' : 'expired_or_unknown';
         miss404 += 1;
-        if (miss404 >= 2) { phase = 'gone'; render(); return; }
+        if (miss404 >= 2) {
+          phase = 'gone'; render();
+          // not stopped on purpose: the host's phone may put it back, so keep checking slowly
+          if (goneReason !== 'stopped') timer = window.setTimeout(() => { phase = 'loading'; miss404 = 1; void poll(); }, 15000);
+          return;
+        }
         throw new Error('miss');
       }
       if (res.status === 503) { phase = 'unavailable'; render(); timer = window.setTimeout(poll, 30000); return; }
