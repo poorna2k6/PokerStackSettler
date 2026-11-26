@@ -260,7 +260,8 @@ function snapshot(status: string): SavedSession {
     defaultBuyIn: s.defaultBuyIn, expenseCents: s.expenseCents,
     players: s.players.map(p => ({ ...p })),
     paid: { ...s.paid },
-    bills: (s.bills ?? []).map(b => ({ ...b }))
+    bills: (s.bills ?? []).map(b => ({ ...b })),
+    round: s.round === true
   };
 }
 
@@ -308,7 +309,7 @@ export function loadSaved(id: string) {
   if (!s) return;
   replaceSession({
     id: s.id, name: s.name, defaultBuyIn: s.defaultBuyIn, expenseCents: s.expenseCents,
-    isEnded: s.status.startsWith('Completed'), isDemo: false, players: s.players.map(p => ({ ...p })), paid: { ...(s.paid ?? {}) }, bills: (s.bills ?? []).map(b => ({ ...b }))
+    isEnded: s.status.startsWith('Completed'), isDemo: false, players: s.players.map(p => ({ ...p })), paid: { ...(s.paid ?? {}) }, bills: (s.bills ?? []).map(b => ({ ...b })), round: s.round === true
   });
   state.tab = 'table';
   commit();
@@ -344,7 +345,7 @@ export function importBackup(text: string): string | null {
   const s = parsed.session;
   replaceSession({
     id: s.id, name: s.name, defaultBuyIn: s.defaultBuyIn, expenseCents: s.expenseCents,
-    isEnded: false, isDemo: false, players: s.players, paid: {}, bills: s.bills ?? []
+    isEnded: false, isDemo: false, players: s.players, paid: {}, bills: s.bills ?? [], round: s.round === true
   });
   state.tab = 'table';
   commit();

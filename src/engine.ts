@@ -516,6 +516,7 @@ export interface SavedSession {
   /** paid-transfer marks, so a settled game reopened from History keeps them */
   paid?: Record<string, boolean>;
   bills?: Bill[];
+  round?: boolean;
 }
 
 export const MIN_UNIT = 0.01;
@@ -556,7 +557,8 @@ export function sanitizeSaved(raw: unknown): SavedSession | null {
     expenseCents: safeCents(o.expenseCents),
     players,
     paid: sanitizePaid(o.paid),
-    bills: sanitizeBills(o.bills)
+    bills: sanitizeBills(o.bills),
+    round: o.round === true
   };
 }
 
@@ -653,7 +655,8 @@ export function buildNotepad(s: SavedSession | (SessionData & { timestamp?: stri
     defaultBuyIn: s.defaultBuyIn,
     expenseCents: expense,
     players: s.players,
-    bills: s.bills ?? []
+    bills: s.bills ?? [],
+    round: 'round' in s && s.round === true
   });
   lines.push(bar, 'MACHINE RESTORE PAYLOAD (keep this line to restore into the app):', MARKER + payload, bar);
   return lines.join('\n');

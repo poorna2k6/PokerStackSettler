@@ -226,10 +226,32 @@ describe('expiry and abuse limits', () => {
     expect((r.body as { finalTtl: number }).finalTtl).toBe(7 * 86400);
   });
 
+  it('with a server secret, only the real host can restore a lost table', async () => {
+    let t = 1_000_000;
+    const store = memoryStore(() => t);
+    ip++;
+    const SECRET = 'test-secret';
+    const call = (r: ApiRequest) => handleShare(r, store, t, undefined, SECRET);
+    const made = await call(req('POST', { body: { snapshot: snap() } }));
+    const data = made.body as { code: string; hostKey: string };
+    expect(data.hostKey).toContain('.');
+    const put = (key: string) => call(req('PUT', { query: { code: data.code, restore: '1' }, headers: { 'x-host-key': key }, body: { snapshot: snap({ name: 'Back' }) } }));
+    await store.del(`share:${data.code}`);
+    expect((await put('attacker-made-up-key-0123456789')).status).toBe(404);   // no proof: refused
+    expect((await put('x'.repeat(20) + '.' + 'y'.repeat(22))).status).toBe(404); // forged proof: refused
+    expect((await put(data.hostKey)).status).toBe(200);                          // the real key: restored
+    expect((await call(req('GET', { query: { code: data.code } }))).status).toBe(200);
+    // proofs are bound to the code: a key from another table does not restore this one
+    const other = (await call(req('POST', { body: { snapshot: snap() } }))).body as { code: string; hostKey: string };
+    await store.del(`share:${data.code}`);
+    const r = await call(req('PUT', { query: { code: data.code, restore: '1' }, headers: { 'x-host-key': other.hostKey }, body: { snapshot: snap() } }));
+    expect(r.status).toBe(404);
+  });
+
   it('throttles code guessing per IP', async () => {
     const { call } = setup();
     let last = 0;
-    for (let i = 0; i < 45; i++) last = (await call(req('GET', { query: { code: 'ABCDEFGH' } }))).status;
+    for (let i = 0; i < 205; i++) last = (await call(req('GET', { query: { code: 'ABCDEFGH' } }))).status;
     expect(last).toBe(429);
     // another IP is unaffected
     expect((await call(req('GET', { query: { code: 'ABCDEFGH' }, ip: '8.8.8.8' }))).status).toBe(404);

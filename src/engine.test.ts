@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildNotepad, buildReceipt, buyInCount, paidKey, uniqueSessionIds, formatUnit, leaderboard, parseBuyInUnit, sanitizeBuyIn, parseBackup, reconcile, sanitizePlayers, settleNodes, solve,
-  formatCurrency, toCents, splitEvenly, sanitizeBills, roundToDollars, MAX_BILL_CENTS, type Player
+  formatCurrency, toCents, splitEvenly, sanitizeBills, roundToDollars, sanitizeSaved, MAX_BILL_CENTS, type Player
 } from './engine';
 
 const P = (id: string, bi: number, co: number): Player => ({ id, name: id, buyInCents: bi, cashOutCents: co });
@@ -419,5 +419,18 @@ describe('rounding payments to whole dollars', () => {
     const P2 = (id: string, bi: number, co: number) => ({ id, name: id.toUpperCase(), buyInCents: bi, cashOutCents: co });
     const a = solve([P2('a', 10000, 20000), P2('b', 10000, 5000)], 0, 100, [], true);
     expect(a.isBalanced).toBe(false);
+  });
+});
+
+describe('History keeps the whole-dollar choice', () => {
+  it('round-trips through the saved session and the .txt backup', () => {
+    const players = [{ id: 'a', name: 'A', buyInCents: 10000, cashOutCents: 10049 }, { id: 'b', name: 'B', buyInCents: 10000, cashOutCents: 9951 }];
+    const saved = sanitizeSaved({ id: 's', name: 'G', defaultBuyIn: 100, expenseCents: 0, players, round: true });
+    expect(saved?.round).toBe(true);
+    expect(sanitizeSaved({ id: 's', name: 'G', players })?.round).toBe(false);
+    const text = buildNotepad({ id: 's', name: 'G', defaultBuyIn: 100, expenseCents: 0, isEnded: false, paid: {}, players, round: true });
+    expect(text).toContain('0 transfers');
+    const back = parseBackup(text);
+    expect(back?.kind === 'session' && back.session.round).toBe(true);
   });
 });

@@ -28,6 +28,7 @@ export function mountViewer(rawCode: string) {
   let updated = '';
   let failures = 0;
   let miss404 = 0;
+  let goneRetries = 0;
   let goneReason: 'stopped' | 'expired_or_unknown' = 'expired_or_unknown';
   let timer: number | undefined;
   // The shared link opens on the oval table; the viewer can switch to the list. In memory only: a viewer
@@ -332,11 +333,15 @@ export function mountViewer(rawCode: string) {
         // A single 404 can be a hiccup in the backend; only believe it when it repeats.
         const body = (await res.json().catch(() => ({}))) as { reason?: string };
         goneReason = body.reason === 'stopped' ? 'stopped' : 'expired_or_unknown';
+        rev = 0; // a table that comes back may restart its revision numbers: ask for the full table again
         miss404 += 1;
         if (miss404 >= 2) {
           phase = 'gone'; render();
           // not stopped on purpose: the host's phone may put it back, so keep checking slowly
-          if (goneReason !== 'stopped') timer = window.setTimeout(() => { phase = 'loading'; miss404 = 1; void poll(); }, 15000);
+          if (goneReason !== 'stopped' && document.visibilityState === 'visible') {
+            goneRetries += 1;
+            timer = window.setTimeout(() => { phase = 'loading'; miss404 = 1; void poll(); }, Math.min(120000, 15000 * goneRetries));
+          }
           return;
         }
         throw new Error('miss');
@@ -347,6 +352,7 @@ export function mountViewer(rawCode: string) {
       const data = (await res.json()) as { unchanged?: boolean; rev: number; snapshot?: SharedSnapshot; offer?: PublicOffer; expiresAt?: number };
       failures = 0;
       miss404 = 0;
+      goneRetries = 0;
       const changed = (!data.unchanged && !!data.snapshot) || phase !== 'ok';
       if (data.expiresAt) validUntil = data.expiresAt;
       if (!data.unchanged && data.snapshot) {
@@ -378,7 +384,10 @@ export function mountViewer(rawCode: string) {
 
   document.addEventListener('visibilitychange', () => {
     clearTimeout(timer);
-    if (document.visibilityState === 'visible') void poll();
+    if (document.visibilityState !== 'visible') return;
+    // coming back to the page: also try again if the table was missing (it may have been restored meanwhile)
+    if (phase === 'gone' && goneReason !== 'stopped') { phase = 'loading'; miss404 = 1; }
+    void poll();
   });
   window.addEventListener('online', () => { failures = 0; void poll(); });
 
