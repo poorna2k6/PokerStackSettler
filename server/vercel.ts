@@ -1,7 +1,7 @@
 // Vercel serverless function: /api/share. Bundled into api/share.js by `npm run build:api`.
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { MAX_BODY_BYTES, handleShare, type ApiRequest } from './handler';
-import { getStore } from './store';
+import { getStore, redisCreds } from './store';
 
 type VercelLike = IncomingMessage & { query?: Record<string, string | string[] | undefined>; body?: unknown };
 
@@ -32,7 +32,7 @@ export default async function handler(req: VercelLike, res: ServerResponse) {
   };
   // The server secret lets a lost table be restored only by its real host (see handler.ts). Redis credentials are
   // already secret and stable across restarts, so they serve when SHARE_SECRET is not set.
-  const secret = process.env.SHARE_SECRET ?? process.env.UPSTASH_REDIS_REST_TOKEN ?? process.env.KV_REST_API_TOKEN;
+  const secret = process.env.SHARE_SECRET ?? redisCreds(process.env)?.token;
   const out = await handleShare(apiReq, getStore(), Date.now(), undefined, secret);
   res.statusCode = out.status;
   res.setHeader('Content-Type', 'application/json');

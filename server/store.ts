@@ -46,10 +46,25 @@ export function unconfiguredStore(): Store {
   return { kind: 'unconfigured', get: fail, set: fail, del: fail, setIf: fail, delIf: fail, incr: fail };
 }
 
+/**
+ * Finds the Redis REST URL and (read-write) token. Vercel's integration lets you choose a prefix for the variable
+ * names (for example POKER_REDIS_KV_REST_API_URL), so besides the plain names any `<prefix>_KV_REST_API_URL` /
+ * `<prefix>_UPSTASH_REDIS_REST_URL` with its matching token is accepted. READ_ONLY tokens are never used.
+ */
+export function redisCreds(env: Record<string, string | undefined>): { url: string; token: string } | null {
+  const pick = (suffixes: string[]) => {
+    for (const s of suffixes) if (env[s]) return env[s];
+    for (const [k, v] of Object.entries(env)) if (v && !/READ_ONLY/i.test(k) && suffixes.some(s => k.endsWith(`_${s}`))) return v;
+    return undefined;
+  };
+  const url = pick(['UPSTASH_REDIS_REST_URL', 'KV_REST_API_URL']);
+  const token = pick(['UPSTASH_REDIS_REST_TOKEN', 'KV_REST_API_TOKEN']);
+  return url && token && /^https:\/\//.test(url) ? { url, token } : null;
+}
+
 export function pickStore(env: Record<string, string | undefined>, fetchImpl: typeof fetch = fetch): Store {
-  const url = env.UPSTASH_REDIS_REST_URL ?? env.KV_REST_API_URL;
-  const token = env.UPSTASH_REDIS_REST_TOKEN ?? env.KV_REST_API_TOKEN;
-  if (url && token) return upstash(url, token, fetchImpl);
+  const creds = redisCreds(env);
+  if (creds) return upstash(creds.url, creds.token, fetchImpl);
   // Temporary memory storage keeps sharing usable until Redis is connected, but links can disappear when Vercel
   // restarts or switches server instances. Set ALLOW_MEMORY_STORE=0 to refuse instead (503 storage_not_configured).
   if (env.VERCEL && env.ALLOW_MEMORY_STORE === '0') {
