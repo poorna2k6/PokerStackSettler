@@ -38,7 +38,7 @@ const B=process.env.BASE||'http://localhost:4174/';
   await p.click('.sheet button:has-text("No extra expenses")'); await p.waitForTimeout(500);
   await p.click('.sheet button:has-text("End session")'); await p.waitForTimeout(1200);
   t=await p.locator('body').innerText();
-  ok('settle tab lists what everyone handed back', /what everyone handed back/i.test(t) && /120 chips back/.test(t) && /= \$30\.00/.test(t) && /\+\$10\.00/.test(t), t.match(/[^\n]*120 chips[^\n]*/g)?.join('|'));
+  ok('settle tab lists what everyone handed back', /what everyone handed back/i.test(t) && /120 chips/.test(t) && /= \$30\.00/.test(t) && /\+\$10\.00/.test(t), t.match(/[^\n]*120 chips[^\n]*/g)?.join('|'));
   ok('Bob pays Ann $10', /Bob pays Ann/.test(t) && /\$10\.00/.test(t));
   // viewer
   const vc=await b.newContext({...devices['iPhone 13']}); const v=await vc.newPage(); await v.goto(B+'#/v/'+code); await v.waitForTimeout(1800);

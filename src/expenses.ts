@@ -1,7 +1,7 @@
 // "Extra expenses" (food, drinks…): the list, the add/edit form and the End & settle question.
 import { h, haptic, openSheet, confirmSheet, toast } from './dom';
 import { formatCurrency, toCents, MAX_BILLS } from './engine';
-import { audit, checkBill, removeBill, saveBill, state, subscribe } from './state';
+import { audit, checkBill, previewAudit, removeBill, saveBill, state, subscribe } from './state';
 import { amountCol, group } from './ui';
 
 const payerName = (b: { payerId?: string; guest?: string }) =>
@@ -17,6 +17,7 @@ export function openExpenses(onDone?: () => void) {
       const bills = s.bills ?? [];
       const locked = s.isEnded;
       const a = audit();
+      const unbalanced = !a.isBalanced;
       body.replaceChildren(
         h('p', { class: 'muted small', text: 'Food, drinks or anything else paid by a player — or by someone who isn’t playing. Each expense is split equally between the people you choose (everyone by default) and added to who pays whom. Chips and poker results are not changed.' }),
         bills.length === 0
@@ -31,7 +32,7 @@ export function openExpenses(onDone?: () => void) {
             h('div', { class: 'row' },
               h('span', { class: 'muted grow', text: 'Total' }),
               h('strong', { class: 'mono', text: formatCurrency(a.billsTotalCents) }))),
-        ...(bills.length ? [h('div', { class: 'section-title' }, h('span', { text: 'Per person: poker → after expenses' })), group(
+        ...(bills.length ? [h('div', { class: 'section-title' }, h('span', { text: 'Per person: poker → after expenses' })), ...(unbalanced ? [h('p', { class: 'muted small', text: 'The chips don’t balance yet, so these amounts will change once they do.' })] : []), group(
           ...a.players.map(p => h('div', { class: 'row' }, h('span', { class: 'grow', text: p.name }), amountCol(p.netCents, p.finalCents))),
           ...a.guests.map(g => h('div', { class: 'row' }, h('span', { class: 'grow', text: `${g.name} (not playing)` }), amountCol(0, g.finalCents))))] : []),
         ...(locked ? [h('p', { class: 'muted small', text: 'The session is settled and locked. Reopen it on the Table tab to change expenses.' })] : [h('button', { class: 'btn tinted block', text: '＋ Add expense', attrs: { disabled: bills.length >= MAX_BILLS }, on: { click: () => openBillForm() } })]),
@@ -147,7 +148,7 @@ export function askExtraExpenses(proceed: () => void) {
 
 /** One line per person for the confirmation: poker + expenses = final. */
 export function previewLines(): string {
-  const a = audit();
+  const a = previewAudit();
   if (a.billsTotalCents === 0) return '';
   const lines = a.players.map(p => `${p.name}: ${formatCurrency(p.netCents, true)} poker ${p.paidCents - p.shareCents >= 0 ? '+' : '−'} ${formatCurrency(Math.abs(p.paidCents - p.shareCents))} food = ${formatCurrency(p.finalCents, true)}`);
   a.guests.forEach(g => lines.push(`${g.name} (not playing): ${formatCurrency(g.finalCents, true)}`));

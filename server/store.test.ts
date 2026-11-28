@@ -33,11 +33,13 @@ describe('upstash store', () => {
     const fake = (async (_url: string, init: RequestInit) => {
       const args = JSON.parse(String(init.body)) as unknown[];
       calls.push(args);
-      return { ok: true, json: async () => ({ result: args[0] === 'INCR' ? 7 : 'OK' }) } as Response;
+      return { ok: true, json: async () => ({ result: args[0] === 'EVAL' ? 7 : 'OK' }) } as Response;
     }) as unknown as typeof fetch;
     const store = upstash('https://redis.example', 'tok', fake);
     expect(await store.incr('rl:x', 3600)).toBe(7);
-    expect(calls).toEqual([['SET', 'rl:x', 0, 'EX', 3600, 'NX'], ['INCR', 'rl:x']]);
+    expect(calls).toHaveLength(1); // one atomic step
+    expect(calls[0].slice(0, 1)).toEqual(['EVAL']);
+    expect(calls[0].slice(2)).toEqual([1, 'rl:x', 3600]);
   });
 
   it('turns an HTTP error into an exception (the API answers 500, not 404)', async () => {
@@ -92,6 +94,10 @@ describe('redisCreds', () => {
     };
     expect(redisCreds(prefixed)).toEqual({ url: 'https://x.upstash.io', token: 'rw' });
     expect(redisCreds({ POKER_REDIS_KV_REST_API_READ_ONLY_TOKEN: 'ro', POKER_REDIS_KV_REST_API_URL: 'https://x' })).toBeNull();
+    // URL and token must come from the same prefix
+    expect(redisCreds({ A_KV_REST_API_URL: 'https://a', B_KV_REST_API_TOKEN: 'tokB' })).toBeNull();
+    expect(redisCreds({ A_KV_REST_API_URL: 'https://a', A_KV_REST_API_TOKEN: 'tokA', B_KV_REST_API_URL: 'https://b', B_KV_REST_API_TOKEN: 'tokB' })).toEqual({ url: 'https://a', token: 'tokA' });
+    expect(redisCreds({ P_KV_REST_API_URL: 'https://p', P_KV_REST_API_READONLY_TOKEN: 'ro' })).toBeNull();
     expect(redisCreds({ KV_REST_API_URL: 'http://insecure', KV_REST_API_TOKEN: 't' })).toBeNull();
     expect(pickStore({ ...prefixed, VERCEL: '1' }).kind).toBe('redis');
   });

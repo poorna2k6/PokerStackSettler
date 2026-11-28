@@ -9,7 +9,7 @@ export const header = (title: string, caption?: string) =>
 export function kpi(label: string, value: string, sub?: string, tone = '') {
   return h('div', { class: `kpi ${tone}` },
     h('div', { class: 'kpi-label', text: label }),
-    h('div', { class: 'kpi-value mono', text: value }),
+    h('div', { class: `kpi-value mono ${value.length > 9 ? 'long' : ''}`, text: value }),
     sub ? h('div', { class: 'kpi-sub mono', text: sub }) : null);
 }
 

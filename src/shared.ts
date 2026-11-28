@@ -74,7 +74,7 @@ export function sanitizeSnapshot(raw: unknown, now = Date.now()): SharedSnapshot
   return {
     name: String(typeof o.name === 'string' ? o.name : 'Poker Session').trim().slice(0, 80) || 'Poker Session',
     defaultBuyIn: sanitizeBuyIn(o.defaultBuyIn),
-    chipsPerBuyIn: sanitizeChipsPerBuyIn(o.chipsPerBuyIn),
+    chipsPerBuyIn: sanitizeChipsPerBuyIn(o.chipsPerBuyIn, sanitizeBuyIn(o.defaultBuyIn)),
     expenseCents: safeCents(o.expenseCents),
     isEnded: o.isEnded === true,
     players: sanitizePlayers(o.players),

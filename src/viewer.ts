@@ -29,6 +29,7 @@ export function mountViewer(rawCode: string) {
   let failures = 0;
   let miss404 = 0;
   let goneRetries = 0;
+  let clockSkew = 0; // server time minus this phone's time, from the response's Date header
   let goneReason: 'stopped' | 'expired_or_unknown' = 'expired_or_unknown';
   let timer: number | undefined;
   // The shared link opens on the oval table; the viewer can switch to the list. In memory only: a viewer
@@ -119,7 +120,7 @@ export function mountViewer(rawCode: string) {
     if (!o || o.kind !== 'seat' || !snap) return null;
     const name = snap.players.find(p => p.id === o.playerId)?.name ?? 'a player';
     const mine = readClaim() !== null;
-    if (o.status === 'claimed') {
+    if (o.status === 'claimed' || mine) {
       return h('div', { class: 'offer-card', attrs: { role: 'status' } },
         h('strong', { text: mine ? '⏳ Waiting for the host to confirm…' : `${name} accepted — waiting for the host.` }));
     }
@@ -139,13 +140,13 @@ export function mountViewer(rawCode: string) {
       const stopped = goneReason === 'stopped';
       return [
         group(h('div', { class: 'row empty', attrs: { role: 'alert' } }, h('span', {
-          text: stopped ? 'The host stopped sharing this table.' : 'Can’t find this table right now — waiting for the host to reconnect. If it doesn’t come back, ask the host for a new link.'
+          text: stopped ? 'The host stopped sharing this table.' : 'We can’t find this table. If you typed the code, check it. Otherwise the host may reconnect in a moment — this page keeps trying. If it doesn’t come back, ask the host for a new link.'
         }))),
         h('button', { class: 'btn tinted block slim', text: 'Try again', on: { click: () => { phase = 'loading'; miss404 = 0; render(); void poll(); } } })
       ];
     }
     if (phase === 'unavailable' && !snap) {
-      return [group(h('div', { class: 'row empty', attrs: { role: 'alert' } }, h('span', { text: 'Live sharing isn’t available right now — the server’s storage isn’t set up. Please tell the host.' })))];
+      return [group(h('div', { class: 'row empty', attrs: { role: 'alert' } }, h('span', { text: 'Live sharing isn’t working right now. Please tell the host.' })))];
     }
     if (!snap) {
       return [group(h('div', { class: 'row empty' }, h('span', { text: phase === 'offline' ? 'Can’t reach the server — retrying…' : 'Loading the table…' })))];
@@ -314,7 +315,7 @@ export function mountViewer(rawCode: string) {
   /** "Host updated 3 min ago" — and a nudge when nothing has changed for a while; plus how long the link lasts. */
   const freshText = () => {
     if (!snap) return '';
-    const quiet = Date.now() - snap.updatedAt;
+    const quiet = Date.now() + clockSkew - snap.updatedAt; // the host's time is compared with the SERVER's clock, not this phone's
     const until = validUntil ? ` · link valid until ${new Date(validUntil).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}` : '';
     return `Host updated ${ago(quiet)}${quiet > 10 * 60000 && !snap.isEnded ? ' — the host may be away' : ''}${until}`;
   };
@@ -327,7 +328,8 @@ export function mountViewer(rawCode: string) {
     phase === 'gone' ? (goneReason === 'stopped' ? 'Stopped' : 'Expired') : '';
 
   function render() {
-    const pill = !snap ? null : h('span', { class: `pill ${snap.isEnded ? 'amber' : 'green'}`, text: snap.isEnded ? 'Settled' : 'Live' });
+    const lost = phase === 'gone';
+    const pill = !snap ? null : h('span', { class: `pill ${lost ? 'amber' : snap.isEnded ? 'amber' : 'green'}`, text: lost ? (goneReason === 'stopped' ? 'Stopped' : 'Not found') : snap.isEnded ? 'Settled' : 'Live' });
     app.replaceChildren(
       h('main', { class: 'scroll' },
         h('div', { class: 'large-title' }, h('h1', { text: 'Live table' }), pill),
@@ -336,7 +338,7 @@ export function mountViewer(rawCode: string) {
         h('div', { class: 'view' }, ...body())),
       h('nav', { class: 'tabbar viewer-bar', attrs: { 'aria-label': 'Live view' } },
         (statusEl = h('span', { class: `viewer-status ${phase}`, text: statusText(), attrs: { role: 'status', 'aria-live': 'polite' } })),
-        h('button', { class: 'link', text: 'Refresh', attrs: { 'aria-label': 'Refresh now' }, on: { click: () => { failures = 0; void poll(); toast('Refreshing…'); } } }),
+        h('button', { class: 'link', text: 'Refresh', attrs: { 'aria-label': 'Refresh now' }, on: { click: () => { failures = 0; if (phase === 'gone') { phase = 'loading'; miss404 = 1; } void poll(); toast('Refreshing…'); } } }),
         h('button', { class: 'link', text: 'Leave', attrs: { 'aria-label': 'Leave live view' }, on: { click: leave } })));
   }
 
@@ -383,6 +385,8 @@ export function mountViewer(rawCode: string) {
       goneRetries = 0;
       const changed = (!data.unchanged && !!data.snapshot) || phase !== 'ok';
       if (data.expiresAt) validUntil = data.expiresAt;
+      const serverDate = Date.parse(res.headers.get('date') ?? '');
+      if (Number.isFinite(serverDate)) clockSkew = serverDate - Date.now();
       if (!data.unchanged) claims = Array.isArray(data.claims) ? data.claims : [];
       if (!data.unchanged && data.snapshot) {
         const before = snap;

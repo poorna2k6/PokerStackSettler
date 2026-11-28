@@ -224,7 +224,7 @@ export async function handleShare(req: ApiRequest, store: Store, now = Date.now(
     const code = normalizeCode(req.query.code);
     if (!code) return err(400, 'Invalid code');
 
-    if (req.query.action) return handleAction(req, store, code, now, limits, ip);
+    if (req.query.action) return await handleAction(req, store, code, now, limits, ip);
 
     if (method === 'GET') {
       if (await limited(store, `rl:read:${ip}`, limits.read)) return err(429, 'Too many requests');
@@ -247,6 +247,9 @@ export async function handleShare(req: ApiRequest, store: Store, now = Date.now(
     if (method === 'PUT' || method === 'DELETE') {
       const hostKey = req.headers['x-host-key'];
       if (method === 'PUT') {
+        // A wrong key must never use up the real host's write budget (the code is public to every viewer).
+        const existing = await load(store, code);
+        if (existing && !keyMatches(hostKey, existing.keyHash)) return err(403, 'Only the host can change this table');
         if (await limited(store, `rl:write:${code}`, limits.write)) return err(429, 'Too many updates');
         const snapshot = sanitizeSnapshot((req.body as { snapshot?: unknown } | null)?.snapshot, now);
         if (!snapshot) return err(400, 'Invalid session');
@@ -258,7 +261,9 @@ export async function handleShare(req: ApiRequest, store: Store, now = Date.now(
           // under the SAME code and key. A table the host deliberately stopped (tombstone) is never brought back.
           if (await limited(store, `rl:create:${ip}`, limits.create)) return err(429, 'Too many new shares, try again later');
           const ttl = pickTtl(askedTtl);
-          const rec: Record_ = { keyHash: sha256(hostKey as string), snapshot, rev: 1, createdAt: now, epoch: 1, ttl, expiresAt: now + ttl * 1000 };
+          // revision numbers must keep growing across a restore, or a viewer holding an old number would see "unchanged"
+          const startRev = Math.max(1, Math.floor(now / 1000));
+          const rec: Record_ = { keyHash: sha256(hostKey as string), snapshot, rev: startRev, createdAt: now, epoch: 1, ttl, expiresAt: now + ttl * 1000 };
           let life = ttl;
           if (snapshot.isEnded) {
             rec.settledAt = now;
@@ -267,10 +272,10 @@ export async function handleShare(req: ApiRequest, store: Store, now = Date.now(
             life = rec.finalTtl;
           }
           if (await store.setIf(`share:${code}`, JSON.stringify(rec), life, null)) {
-            return json(200, { rev: 1, epoch: 1, ttl, expiresAt: rec.expiresAt, restored: true });
+            return json(200, { rev: startRev, epoch: 1, ttl, expiresAt: rec.expiresAt, restored: true });
           }
         }
-        return mutate(store, code, now, async rec => {
+        return await mutate(store, code, now, async rec => {
           if (!rec) return { res: await gone(store, code) };
           if (!keyMatches(hostKey, rec.keyHash)) return { res: err(403, 'Only the host can change this table') };
           // A heartbeat only says "the host's app is still open": it renews the lifetime and changes nothing else.
@@ -295,7 +300,7 @@ export async function handleShare(req: ApiRequest, store: Store, now = Date.now(
           return { next, res: json(200, { rev: next.rev, epoch: next.epoch ?? 1, ttl: next.ttl, finalTtl: next.finalTtl, expiresAt: until }) };
         });
       }
-      return mutate(store, code, now, async rec => {
+      return await mutate(store, code, now, async rec => {
         if (!rec) return { res: await gone(store, code) };
         if (!keyMatches(hostKey, rec.keyHash)) return { res: err(403, 'Only the host can change this table') };
         return { remove: true, res: json(200, { ok: true }) };
@@ -340,7 +345,7 @@ async function handleAction(
     let counted = false;
     const countOnce = async () => { if (counted) return false; counted = true; return throttled(); };
 
-    return mutate(store, code, now, async rec => {
+    return await mutate(store, code, now, async rec => {
       if (!rec) return { res: await gone(store, code) };
       const offer = liveOffer(rec, now);
       if (!offer) return { res: err(404, 'No hand-over is open') };
@@ -367,7 +372,7 @@ async function handleAction(
     const key = typeof body.key === 'string' ? body.key : '';
     if (key.length > 260 || !CLAIM_KEY_RE.test(key)) return err(400, 'Invalid payment');
     if (await limited(store, `rl:paid:${ip}`, limits.paid)) return err(429, 'Too many requests, try again later');
-    return mutate(store, code, now, async rec => {
+    return await mutate(store, code, now, async rec => {
       if (!rec) return { res: await gone(store, code) };
       // only a payment between people who are actually at this table can be claimed
       const arrow = key.indexOf('->');
@@ -394,7 +399,7 @@ async function handleAction(
     // the host has dealt with these requests (approved or declined)
     if (method !== 'POST') return err(405, 'Method not allowed');
     const keys = Array.isArray(body.keys) ? body.keys.filter((k): k is string => typeof k === 'string').slice(0, MAX_CLAIMS) : [];
-    return mutate(store, code, now, async rec => {
+    return await mutate(store, code, now, async rec => {
       if (!rec) return { res: await gone(store, code) };
       if (!keyMatches(hostKey, rec.keyHash)) return { res: err(403, 'Only the host can change this table') };
       if (!rec.claims || !keys.some(k => Object.hasOwn(rec.claims!, k))) return { res: json(200, { ok: true }) };
@@ -406,30 +411,32 @@ async function handleAction(
   if (action === 'verify') {
     if (method !== 'POST') return err(405, 'Method not allowed');
     const rec = await load(store, code);
-    if (!rec) return gone(store, code);
+    if (!rec) return await gone(store, code);
     if (!keyMatches(hostKey, rec.keyHash)) return err(403, 'Only the host can change this table');
     return json(200, { ok: true, epoch: rec.epoch ?? 1 });
   }
 
   if (action === 'offer') {
     if (method === 'DELETE') {
-      return mutate(store, code, now, async rec => {
+      return await mutate(store, code, now, async rec => {
         if (!rec) return { res: await gone(store, code) };
         if (!keyMatches(hostKey, rec.keyHash)) return { res: err(403, 'Only the host can change this table') };
         return { next: { ...rec, rev: rec.rev + 1, offer: undefined }, res: json(200, { ok: true }) };
       });
     }
     if (method !== 'POST') return err(405, 'Method not allowed');
+    const existing = await load(store, code);
+    if (existing && !keyMatches(hostKey, existing.keyHash)) return err(403, 'Only the host can change this table');
     if (await limited(store, `rl:write:${code}`, limits.write)) return err(429, 'Too many updates');
     const kind = body.kind;
     if (kind !== 'seat' && kind !== 'link') {
       // still answer 403 to non-hosts before revealing anything about validation
       const rec = await load(store, code);
-      if (!rec) return gone(store, code);
+      if (!rec) return await gone(store, code);
       if (!keyMatches(hostKey, rec.keyHash)) return err(403, 'Only the host can change this table');
       return err(400, 'Invalid offer');
     }
-    return mutate(store, code, now, async rec => {
+    return await mutate(store, code, now, async rec => {
       if (!rec) return { res: await gone(store, code) };
       if (!keyMatches(hostKey, rec.keyHash)) return { res: err(403, 'Only the host can change this table') };
       let offer: Offer;
@@ -450,7 +457,7 @@ async function handleAction(
 
   if (action === 'approve') {
     if (method !== 'POST') return err(405, 'Method not allowed');
-    return mutate(store, code, now, async rec => {
+    return await mutate(store, code, now, async rec => {
       if (!rec) return { res: await gone(store, code) };
       if (!keyMatches(hostKey, rec.keyHash)) return { res: err(403, 'Only the host can change this table') };
       const offer = liveOffer(rec, now);
@@ -465,7 +472,7 @@ async function handleAction(
 
   // unknown actions: stay quiet for non-hosts, as before
   const rec = await load(store, code);
-  if (!rec) return gone(store, code);
+  if (!rec) return await gone(store, code);
   if (!keyMatches(hostKey, rec.keyHash)) return err(403, 'Only the host can change this table');
   return err(400, 'Unknown action');
 }

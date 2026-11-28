@@ -7,6 +7,8 @@ export interface Player {
   cashOutCents: number;
   /** chips the player handed back (only in chip-count games; cashOutCents is then chips x chip value) */
   cashOutChips?: number;
+  /** what the player really handed back, kept when the app had to adjust the count to balance the table */
+  typedChips?: number;
 }
 
 export interface Transfer {
@@ -114,9 +116,11 @@ export function chipRateCents(unitDollars: number, chipsPerBuyIn: number): numbe
   return unit > 0 && unit % chipsPerBuyIn === 0 ? unit / chipsPerBuyIn : null;
 }
 
-export function sanitizeChipsPerBuyIn(v: unknown): number | undefined {
-  const n = typeof v === 'number' ? v : Number(v);
-  return Number.isInteger(n) && n >= 1 && n <= MAX_CHIPS_PER_BUYIN ? n : undefined;
+export function sanitizeChipsPerBuyIn(v: unknown, unitDollars?: number): number | undefined {
+  // only a real number (not true / [40] / '40abc'), and, when the buy-in is known, one that gives a whole-cent chip
+  const n = typeof v === 'number' ? v : typeof v === 'string' && /^\d{1,6}$/.test(v) ? Number(v) : NaN;
+  if (!(Number.isInteger(n) && n >= 1 && n <= MAX_CHIPS_PER_BUYIN)) return undefined;
+  return unitDollars !== undefined && chipRateCents(unitDollars, n) === null ? undefined : n;
 }
 
 export const safeChipCount = (v: unknown): number => {
@@ -398,7 +402,13 @@ export function reconcileChips(players: Player[], rakeCents: number, mode: Recon
   if (!sum || sum.diff === 0) return players;
   const pseudo: Player[] = sum.lines.map(l => ({ id: l.id, name: l.name, buyInCents: l.issued, cashOutCents: l.returned }));
   const fixed = reconcile(pseudo, sum.rakeChips, mode, 1);
-  return players.map((p, i) => ({ ...p, cashOutChips: fixed[i].cashOutCents, cashOutCents: fixed[i].cashOutCents * sum.rateCents }));
+  return players.map((p, i) => ({
+    ...p,
+    // remember what was really typed, so the adjustment is never hidden from the player
+    ...(fixed[i].cashOutCents !== sum.lines[i].returned ? { typedChips: p.typedChips ?? sum.lines[i].returned } : {}),
+    cashOutChips: fixed[i].cashOutCents,
+    cashOutCents: fixed[i].cashOutCents * sum.rateCents
+  }));
 }
 
 /** Returns new players whose cash-outs add up to buy-ins minus the expense pot. */
@@ -429,7 +439,8 @@ export function reconcile(
       const b = cloned[best].cashOutCents - cloned[best].buyInCents;
       if (a > b) best = i;
     }
-    need -= apply(cloned[best], need);
+    // nobody ahead: handing everything to a player who is not a winner would invent a winner, so fall through to the equal split
+    if (cloned[best].cashOutCents - cloned[best].buyInCents > 0) need -= apply(cloned[best], need);
   } else if (mode === 'proRataWinners') {
     const winners = cloned.filter(p => p.cashOutCents - p.buyInCents > 0);
     const totalWin = winners.reduce((a, w) => a + (w.cashOutCents - w.buyInCents), 0);
@@ -450,14 +461,11 @@ export function reconcile(
   while (need !== 0 && guard++ < 50) {
     const eligible = need > 0 ? cloned : cloned.filter(p => p.cashOutCents > 0);
     if (eligible.length === 0) break;
-    const base = Math.trunc(need / eligible.length) || (need > 0 ? 1 : -1);
+    // everyone gets the same whole share; the leftover units go one each to the first few, never all to one player
+    const per = Math.trunc(need / eligible.length);
+    const left = need - per * eligible.length;
     let used = 0;
-    eligible.forEach((p, i) => {
-      const rem = need - used;
-      if (rem === 0) return;
-      const share = i === eligible.length - 1 ? rem : base;
-      used += apply(p, Math.abs(share) > Math.abs(rem) ? rem : share);
-    });
+    eligible.forEach((p, i) => { used += apply(p, per + (i < Math.abs(left) ? Math.sign(left) : 0)); });
     need -= used;
   }
   return cloned;
@@ -490,7 +498,8 @@ export function sanitizePlayers(raw: unknown): Player[] {
       name: cleanName(o.name),
       buyInCents: safeCents(o.buyInCents),
       cashOutCents: safeCents(o.cashOutCents),
-      ...(o.cashOutChips !== undefined ? { cashOutChips: safeChipCount(o.cashOutChips) } : {})
+      ...(o.cashOutChips !== undefined ? { cashOutChips: safeChipCount(o.cashOutChips) } : {}),
+      ...(o.typedChips !== undefined ? { typedChips: safeChipCount(o.typedChips) } : {})
     });
   });
   return out;
@@ -622,7 +631,7 @@ export function sanitizeSaved(raw: unknown): SavedSession | null {
     name: String(o.name ?? 'Restored Session').slice(0, 80),
     timestamp: String(o.timestamp ?? '').slice(0, 32),
     status: String(o.status ?? 'Saved Snapshot').slice(0, 40),
-    chipsPerBuyIn: sanitizeChipsPerBuyIn(o.chipsPerBuyIn),
+    chipsPerBuyIn: sanitizeChipsPerBuyIn(o.chipsPerBuyIn, sanitizeBuyIn(o.defaultBuyIn)),
     defaultBuyIn: sanitizeBuyIn(o.defaultBuyIn),
     expenseCents: safeCents(o.expenseCents),
     players,
@@ -770,7 +779,8 @@ export interface LeaderRow {
 
 export function leaderboard(sessions: SavedSession[]): LeaderRow[] {
   const map = new Map<string, LeaderRow>();
-  for (const s of sessions) {
+  // only finished games count: a mid-game snapshot with no chips entered yet would look like a loss for everyone
+  for (const s of sessions.filter(x => x.status.startsWith('Completed'))) {
     for (const p of s.players) {
       const key = p.name.trim().toLowerCase();
       const row = map.get(key) ?? { name: p.name, sessions: 0, netCents: 0, buyInCents: 0 };

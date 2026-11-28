@@ -237,8 +237,8 @@ describe('backup parsing', () => {
 describe('leaderboard', () => {
   it('aggregates by case-insensitive name', () => {
     const rows = leaderboard([
-      { id: '1', name: 'g1', timestamp: '', status: '', defaultBuyIn: 100, expenseCents: 0, players: [P('Al', 100, 300)] },
-      { id: '2', name: 'g2', timestamp: '', status: '', defaultBuyIn: 100, expenseCents: 0, players: [P('al', 100, 0)] }
+      { id: '1', name: 'g1', timestamp: '', status: 'Completed & Settled', defaultBuyIn: 100, expenseCents: 0, players: [P('Al', 100, 300)] },
+      { id: '2', name: 'g2', timestamp: '', status: 'Completed & Settled', defaultBuyIn: 100, expenseCents: 0, players: [P('al', 100, 0)] }
     ]);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ sessions: 2, netCents: 100 });
@@ -497,5 +497,32 @@ describe('chip-count games (chips are not dollars)', () => {
     expect(back?.kind === 'session' && back.session.players[0].cashOutChips).toBe(120);
     const receipt = buildReceipt('G', solve(players, 0, 10), {}, chipSummary(players, 10, 40));
     expect(receipt).toContain('120 chips back = $30.00');
+  });
+});
+
+describe('fairer chip fixes', () => {
+  const pl = (id: string, buyIns: number, chips: number) => ({ id, name: id, buyInCents: buyIns * 1000, cashOutCents: chips * 25, cashOutChips: chips });
+  it('equal split spreads leftover chips one at a time, not all onto the last player', () => {
+    const out = reconcileChips([pl('a', 1, 40), pl('b', 1, 40), pl('c', 1, 40), pl('d', 1, 30)], 0, 'equalSplit', 10, 40); // 10 chips short
+    const added = out.map((p, i) => p.cashOutChips! - [40, 40, 40, 30][i]);
+    expect(added.reduce((a, b) => a + b, 0)).toBe(10);
+    expect(Math.max(...added) - Math.min(...added)).toBeLessThanOrEqual(1);
+  });
+  it('top winner never invents a winner out of a player who is not ahead', () => {
+    const out = reconcileChips([pl('a', 1, 30), pl('b', 1, 30), pl('c', 1, 30), pl('d', 1, 30)], 0, 'topWinner', 10, 40); // 40 short, all behind
+    expect(out.map(p => p.cashOutChips)).toEqual([40, 40, 40, 40]);
+  });
+  it('remembers what was typed when a count had to be adjusted', () => {
+    const out = reconcileChips([pl('a', 2, 100), pl('b', 2, 60), pl('c', 1, 10), pl('d', 1, 0)], 0, 'proRataWinners', 10, 40);
+    expect(out[0].typedChips).toBe(100);
+    expect(out[0].cashOutChips).toBe(170);
+    expect(out[2].typedChips).toBeUndefined(); // unchanged
+  });
+  it('rejects odd chip settings from storage', () => {
+    expect(sanitizeChipsPerBuyIn(true)).toBeUndefined();
+    expect(sanitizeChipsPerBuyIn([40])).toBeUndefined();
+    expect(sanitizeChipsPerBuyIn('40abc')).toBeUndefined();
+    expect(sanitizeChipsPerBuyIn(30, 10)).toBeUndefined(); // 33.33 cents
+    expect(sanitizeChipsPerBuyIn(40, 10)).toBe(40);
   });
 });

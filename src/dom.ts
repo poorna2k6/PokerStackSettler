@@ -109,7 +109,9 @@ export function openSheet(title: string, build: (close: () => void) => Node): Sh
   document.addEventListener('keydown', onKey);
   root.append(backdrop, sheet);
   requestAnimationFrame(() => { sheet.classList.add('in'); backdrop.classList.add('in'); });
-  (sheet.querySelector('input, button.primary, button.danger') as HTMLElement | null)?.focus({ preventScroll: true });
+  // focus the first useful control; if there is none, the dialog itself, so Enter/Space never act on the page behind it
+  sheet.tabIndex = -1;
+  ((sheet.querySelector('input, button.primary, button.danger') ?? sheet.querySelector('.sheet-body button')) as HTMLElement | null ?? sheet).focus({ preventScroll: true });
   return { close };
 }
 

@@ -48,7 +48,8 @@ export function loadLive(): SessionData | null {
   const o = read(LIVE_KEY) as Record<string, unknown> | null;
   if (!o || typeof o !== 'object') return null;
   const players = sanitizePlayers(o.players);
-  if (players.length === 0) return null;
+  // a real game that is set up but has no players yet is kept; only an empty old/demo blob is ignored
+  if (players.length === 0 && o.isDemo !== false) return null;
   const legacyExpense = o.expenseDollars !== undefined ? toCents(o.expenseDollars) : 0;
   const expenseCents = o.expenseCents !== undefined ? Math.max(0, Math.round(Number(o.expenseCents)) || 0) : legacyExpense;
   const paid = sanitizePaid(o.paid);
@@ -56,7 +57,7 @@ export function loadLive(): SessionData | null {
     id: typeof o.sessionId === 'string' ? o.sessionId : typeof o.id === 'string' ? o.id : 'sess_live',
     name: String(o.sessionName ?? o.name ?? 'Poker Session').slice(0, 80),
     defaultBuyIn: sanitizeBuyIn(o.defaultBuyIn),
-    chipsPerBuyIn: sanitizeChipsPerBuyIn(o.chipsPerBuyIn),
+    chipsPerBuyIn: sanitizeChipsPerBuyIn(o.chipsPerBuyIn, sanitizeBuyIn(o.defaultBuyIn)),
     expenseCents,
     isEnded: o.isEnded === true,
     isDemo: o.isDemo === true,

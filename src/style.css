@@ -320,3 +320,12 @@ input::placeholder { color: var(--muted); } input:focus { outline: none; color: 
 .chip-preview { margin: 8px 0; font-weight: 600; color: var(--accent); min-height: 2.6em; }
 .chip-line { margin: 2px 0 0; padding: 0 2px; }
 .row.chiprow { gap: 10px; }
+
+.chip-preview.muted { color: var(--muted); font-weight: 500; }
+.kpi-value.long { font-size: 12px; white-space: normal; overflow-wrap: anywhere; }
+.sheet-head { position: sticky; top: 0; z-index: 2; background: var(--bg); }
+[data-theme='light'] .sheet-head { background: #f2f2f7; }
+.sheet-body .pre { max-height: 38vh; overflow-y: auto; }
+.row.totalrow { flex-wrap: wrap; }
+.row.totalrow .grow { flex: 1 1 100%; }
+.stale-banner { margin: 8px 0; }

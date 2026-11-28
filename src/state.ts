@@ -15,6 +15,8 @@ export interface State {
   saved: SavedSession[];
   /** false when the browser refused to persist (private mode, quota, blocked storage) */
   storageOk: boolean;
+  /** another tab on this phone changed the saved game: this tab stops saving so it cannot overwrite it */
+  staleTab: boolean;
   lastSave: string;
 }
 
@@ -42,6 +44,7 @@ export const state: State = {
   session: loadLive() ?? fromPreset(PRESETS[0]),
   saved: loadVault(),
   storageOk: true,
+  staleTab: false,
   lastSave: ''
 };
 // Probe storage once at startup so a blocked browser is flagged before the first edit.
@@ -69,11 +72,43 @@ let persistLocked = false;
  */
 export function lockPersistence() { persistLocked = true; }
 
+// Two tabs share one saved game. When another tab saves it, this tab must not write over it: it locks and asks to reload.
+if (typeof window !== 'undefined') {
+  window.addEventListener('storage', e => {
+    if (e.key !== 'stacksettle_live_autosave_v1' || persistLocked) return;
+    persistLocked = true;
+    state.staleTab = true;
+    listeners.forEach(fn => fn());
+  });
+}
+
+let vaultFailed = false;
+/** Writes History. A failed write keeps the warning banner up until a later write works (a save to the live copy must not hide it). */
+function writeVault(): boolean {
+  const ok = saveVault(state.saved);
+  vaultFailed = !ok;
+  if (!ok) state.storageOk = false;
+  return ok;
+}
+
 export function commit() {
-  if (!persistLocked) state.storageOk = saveLive(state.session);
+  if (!persistLocked) state.storageOk = saveLive(state.session) && !vaultFailed;
   state.lastSave = stamp().slice(11);
   commitHooks.forEach(fn => fn());
   listeners.forEach(fn => fn());
+}
+
+/** The settlement as it will be after "Balance & settle": so the preview matches the result to the cent. */
+export function previewAudit() {
+  const s = state.session;
+  let players = s.players;
+  if (!audit().isBalanced && !(audit().totalBuyInCents > 0 && audit().totalPlayerCashOutCents === 0)) {
+    const fixed = s.chipsPerBuyIn
+      ? reconcileChips(players, s.expenseCents, 'proRataWinners', s.defaultBuyIn, s.chipsPerBuyIn)
+      : reconcile(players, s.expenseCents, 'proRataWinners', s.defaultBuyIn);
+    if (solve(fixed, s.expenseCents, s.defaultBuyIn).isBalanced) players = fixed;
+  }
+  return solve(players, s.expenseCents, s.defaultBuyIn, s.bills ?? [], s.round === true);
 }
 
 export const audit = () => solve(state.session.players, state.session.expenseCents, state.session.defaultBuyIn, state.session.bills ?? [], state.session.round === true);
@@ -86,6 +121,12 @@ export const onShareOrphaned = (fn: (old: Share) => void) => replacedHooks.push(
 
 /** Every path that swaps the open session goes through here, so a live link can never be orphaned. */
 function replaceSession(next: SessionData) {
+  // Never throw a game away: a real table with players is put in History first (unless it is already there).
+  const cur = state.session;
+  if (!cur.isDemo && cur.players.length > 0 && next.id !== cur.id) {
+    const known = state.saved.find(x => x.id === cur.id);
+    saveToHistory(known ? known.status : 'Saved before replacing');
+  }
   const old = state.session.share;
   // taking over the SAME live table must not end its link
   if (old && old.code !== next.share?.code) replacedHooks.forEach(fn => fn(old));
@@ -192,14 +233,34 @@ function note(m: string) {
   s.log = [...(s.log ?? []), { t: Date.now(), m: m.slice(0, 80) }].slice(-MAX_LOG);
 }
 
-export function addPlayer(name: string, buyIns: number) {
-  const unit = toCents(state.session.defaultBuyIn);
-  state.session.players.push({
-    id: uid('p'), name: name.trim().slice(0, 40) || `Player ${state.session.players.length + 1}`,
-    buyInCents: Math.round(Math.max(0, buyIns) * unit), cashOutCents: 0
-  });
-  note(`${state.session.players[state.session.players.length - 1].name} joined`);
+/** A name must be typed, and must not already belong to another player (two Anns make "Ann pays Ann"). */
+export function checkPlayerName(name: string, ignoreId?: string): string | null {
+  const n = name.trim();
+  if (!n) return 'Type a name.';
+  const clash = state.session.players.find(p => p.id !== ignoreId && p.name.trim().toLowerCase() === n.toLowerCase());
+  return clash ? `There is already a player called ${clash.name}. Add a last name or initial.` : null;
+}
+
+/** Returns an error message, or null when the player was added. */
+export function addPlayer(name: string, buyIns: number): string | null {
+  const s = state.session;
+  const nameErr = checkPlayerName(name);
+  if (nameErr) return nameErr;
+  if (!Number.isFinite(buyIns) || buyIns <= 0) return 'Buy-ins must be more than 0 (for example 1 or 2).';
+  if (buyIns > 1000) return 'That is too many buy-ins.';
+  const unit = toCents(s.defaultBuyIn);
+  let buyInCents = Math.round(buyIns * unit);
+  const rate = chipRate();
+  if (rate && s.chipsPerBuyIn) {
+    // a chip game only hands out whole chips
+    const chips = buyIns * s.chipsPerBuyIn;
+    if (Math.abs(chips - Math.round(chips)) > 1e-9) return `${buyIns} buy-ins isn’t a whole number of chips (one buy-in is ${s.chipsPerBuyIn} chips). Use a count that gives whole chips.`;
+    buyInCents = Math.round(chips) * rate;
+  }
+  s.players.push({ id: uid('p'), name: name.trim().slice(0, 40), buyInCents, cashOutCents: 0, ...(rate ? { cashOutChips: 0 } : {}) });
+  note(`${s.players[s.players.length - 1].name} joined`);
   commit();
+  return null;
 }
 export function removePlayer(id: string) {
   const gone = state.session.players.find(p => p.id === id);
@@ -208,6 +269,7 @@ export function removePlayer(id: string) {
   if (gone) for (const b of state.session.bills ?? []) if (b.payerId === id) { delete b.payerId; b.guest = gone.name; }
   for (const b of state.session.bills ?? []) if (b.sharedBy) { b.sharedBy = b.sharedBy.filter(x => x !== id); if (!b.sharedBy.length) delete b.sharedBy; }
   state.session.players = state.session.players.filter(p => p.id !== id);
+  state.session.paid = {}; // who pays whom changes when someone leaves
   commit();
 }
 
@@ -273,6 +335,7 @@ export function updatePlayer(id: string, patch: Partial<Player>) {
     if (chips !== (p.cashOutChips ?? 0)) note(`${p.name} returned ${chips} chips`);
     p.cashOutChips = chips;
     p.cashOutCents = chips * rate;
+    delete p.typedChips; // a fresh count replaces any earlier adjustment
     commit();
     return;
   }
@@ -303,7 +366,7 @@ export function togglePaid(key: string) {
   const saved = state.saved.find(x => x.id === state.session.id);
   if (saved && !state.session.isDemo) {
     saved.paid = { ...state.session.paid };
-    state.storageOk = saveVault(state.saved) && state.storageOk;
+    writeVault();
   }
   commit();
 }
@@ -326,9 +389,9 @@ export function saveToHistory(status = 'Saved Snapshot'): SavedSession | null {
   const snap = snapshot(status);
   const i = state.saved.findIndex(x => x.id === snap.id);
   if (i >= 0) state.saved[i] = snap; else state.saved.unshift(snap);
-  state.storageOk = saveVault(state.saved) && state.storageOk;
+  const ok = writeVault();
   commit();
-  return snap;
+  return ok ? snap : null; // null: nothing was stored (blocked or full)
 }
 
 /**
@@ -337,6 +400,9 @@ export function saveToHistory(status = 'Saved Snapshot'): SavedSession | null {
  * e.g. the expense pot is larger than everything that was bought in.
  */
 export function endSession(): boolean {
+  // nobody has handed anything back: settling now would invent winners and losers
+  const a0 = audit();
+  if (a0.totalBuyInCents > 0 && a0.totalPlayerCashOutCents === 0) return false;
   if (!audit().isBalanced) {
     const s = state.session;
     const fixed = s.chipsPerBuyIn
@@ -344,7 +410,9 @@ export function endSession(): boolean {
       : reconcile(s.players, s.expenseCents, 'proRataWinners', s.defaultBuyIn);
     // Only keep the adjustment if it actually balances; a refusal must not alter what the user typed.
     if (!solve(fixed, s.expenseCents, s.defaultBuyIn).isBalanced) return false;
+    const changed = fixed.filter((p, i) => p.cashOutCents !== s.players[i].cashOutCents).length;
     s.players = fixed;
+    note(`Balanced the table: adjusted ${changed} player${changed === 1 ? '' : 's'}`);
   }
   state.session.isEnded = true;
   note('Game settled');
@@ -374,12 +442,12 @@ export function loadSaved(id: string) {
 
 export function deleteSaved(id: string) {
   state.saved = state.saved.filter(x => x.id !== id);
-  state.storageOk = saveVault(state.saved) && state.storageOk;
+  writeVault();
   commit();
 }
 export function clearHistory() {
   state.saved = [];
-  state.storageOk = saveVault(state.saved) && state.storageOk;
+  writeVault();
   commit();
 }
 
@@ -395,7 +463,7 @@ export function importBackup(text: string): string | null {
     const known = new Set(state.saved.map(s => s.id));
     const added = parsed.sessions.filter(s => !known.has(s.id));
     state.saved = [...added, ...state.saved];
-    state.storageOk = saveVault(state.saved) && state.storageOk;
+    writeVault();
     commit();
     return added.length === 0 ? 'Those sessions are already in History' : `Imported ${added.length} session${added.length === 1 ? '' : 's'}`;
   }

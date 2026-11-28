@@ -301,6 +301,14 @@ describe('expiry and abuse limits', () => {
     expect((await call(req('GET', { query: { code: made.code } }))).status).toBe(404);
   });
 
+  it('wrong-key requests never use up the real host\'s write budget', async () => {
+    const { call } = setup();
+    const { data } = await create(call);
+    const put = (key: string) => call(req('PUT', { query: { code: data.code }, headers: { 'x-host-key': key }, body: { snapshot: snap() } }));
+    for (let i = 0; i < 1600; i++) expect((await put('attacker-key-0123456789')).status).toBe(403);
+    expect((await put(data.hostKey)).status).toBe(200);
+  });
+
   it('throttles code guessing per IP', async () => {
     const { call } = setup();
     let last = 0;
@@ -668,3 +676,24 @@ describe('atomic hand-over under concurrent requests', () => {
   });
 });
 const newKeyA = 'a'.repeat(32);
+
+describe('storage errors answer cleanly', () => {
+  it('every host action returns 503 JSON when no storage is configured (never an unhandled error)', async () => {
+    const { unconfiguredStore } = await import('./store');
+    const store = unconfiguredStore();
+    const call = (r: ApiRequest) => handleShare(r, store);
+    const key = { 'x-host-key': 'k'.repeat(24) };
+    const cases: ApiRequest[] = [
+      req('DELETE', { query: { code: 'ABCDEFGH' }, headers: key }),
+      req('POST', { query: { code: 'ABCDEFGH', action: 'paid' }, body: { key: 'a->b:100' } }),
+      req('POST', { query: { code: 'ABCDEFGH', action: 'ack' }, headers: key, body: { keys: [] } }),
+      req('POST', { query: { code: 'ABCDEFGH', action: 'verify' }, headers: key, body: {} }),
+      req('POST', { query: { code: 'ABCDEFGH', action: 'offer' }, headers: key, body: { kind: 'link' } }),
+      req('PUT', { query: { code: 'ABCDEFGH', restore: '1' }, headers: key, body: { snapshot: snap() } })
+    ];
+    for (const c of cases) {
+      const r = await call(c);
+      expect(r.status).toBe(503);
+    }
+  });
+});

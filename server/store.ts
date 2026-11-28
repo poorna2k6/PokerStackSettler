@@ -8,6 +8,8 @@
 import { StorageNotConfigured, memoryStore, type Store } from './handler';
 
 const SET_IF = "local c = redis.call('GET', KEYS[1]); if (c == false and ARGV[1] == '') or c == ARGV[1] then redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3]); return 1 end; return 0";
+// one atomic step: increment, and start the expiry when the counter is created (so no counter can outlive its window)
+const INCR_EXPIRE = "local v = redis.call('INCR', KEYS[1]); if v == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end; return v";
 const DEL_IF = "if redis.call('GET', KEYS[1]) == ARGV[1] then redis.call('DEL', KEYS[1]); return 1 end; return 0";
 
 export function upstash(url: string, token: string, fetchImpl: typeof fetch = fetch): Store {
@@ -35,8 +37,7 @@ export function upstash(url: string, token: string, fetchImpl: typeof fetch = fe
     async incr(key, ttl) {
       // Create the key WITH its expiry first (no-op if it exists), then increment: a failure between the two
       // calls can no longer leave a counter that never expires.
-      await cmd(['SET', key, 0, 'EX', ttl, 'NX']);
-      return Number(await cmd(['INCR', key]));
+      return Number(await cmd(['EVAL', INCR_EXPIRE, 1, key, ttl]));
     }
   };
 }
@@ -52,14 +53,20 @@ export function unconfiguredStore(): Store {
  * `<prefix>_UPSTASH_REDIS_REST_URL` with its matching token is accepted. READ_ONLY tokens are never used.
  */
 export function redisCreds(env: Record<string, string | undefined>): { url: string; token: string } | null {
-  const pick = (suffixes: string[]) => {
-    for (const s of suffixes) if (env[s]) return env[s];
-    for (const [k, v] of Object.entries(env)) if (v && !/READ_ONLY/i.test(k) && suffixes.some(s => k.endsWith(`_${s}`))) return v;
-    return undefined;
-  };
-  const url = pick(['UPSTASH_REDIS_REST_URL', 'KV_REST_API_URL']);
-  const token = pick(['UPSTASH_REDIS_REST_TOKEN', 'KV_REST_API_TOKEN']);
-  return url && token && /^https:\/\//.test(url) ? { url, token } : null;
+  const pairs: [string, string][] = [['UPSTASH_REDIS_REST_URL', 'UPSTASH_REDIS_REST_TOKEN'], ['KV_REST_API_URL', 'KV_REST_API_TOKEN']];
+  const ok = (url?: string, token?: string) => (url && token && /^https:\/\//.test(url) ? { url, token } : null);
+  // plain names first, then any prefix; the URL and the token must come from the SAME prefix, and never a read-only token
+  for (const [u, t] of pairs) { const r = ok(env[u], env[t]); if (r) return r; }
+  for (const key of Object.keys(env)) {
+    for (const [u, t] of pairs) {
+      if (!key.endsWith(`_${u}`) || /READ_?ONLY/i.test(key)) continue;
+      const tokenKey = `${key.slice(0, key.length - u.length)}${t}`;
+      if (/READ_?ONLY/i.test(tokenKey)) continue;
+      const r = ok(env[key], env[tokenKey]);
+      if (r) return r;
+    }
+  }
+  return null;
 }
 
 export function pickStore(env: Record<string, string | undefined>, fetchImpl: typeof fetch = fetch): Store {

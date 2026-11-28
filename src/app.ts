@@ -15,7 +15,7 @@ import {
 import { PRESETS } from './presets';
 import { THEMES, type Theme } from './storage';
 import {
-  addPlayer, applyReconcile, audit, chipInfo, chipRate, clearHistory, deleteSaved, endSession, importBackup, loadSaved,
+  addPlayer, applyReconcile, audit, checkPlayerName, previewAudit, chipInfo, chipRate, clearHistory, deleteSaved, endSession, importBackup, loadSaved,
   newSession, paidKey, rebuy, removePlayer, reopenSession, saveToHistory, sessionText, setExpense,
   setFinalTtl, setName, setNote, setPrefs, setRound, setTab, setTheme, setUnit, setupChips, state, subscribe, togglePaid, updatePlayer, type Tab
 } from './state';
@@ -26,9 +26,21 @@ let animateSettle = false;
 const money = (c: number) => (c / 100).toFixed(2);
 const unitError = () => toast(`Buy-in unit must be between ${formatUnit(MIN_UNIT)} and ${formatUnit(MAX_UNIT)}`, 'error');
 const changeUnit = (v: string) => { if (!setUnit(v)) unitError(); };
-const parseChips = (v: string) => Math.max(0, Math.round(Number(v.replace(/[,\s]/g, ''))) || 0);
+/** A chip count must be a plain whole number; anything else is refused (null) instead of being guessed at. */
+const parseChips = (v: string): number | null => { const t = v.replace(/[,\s]/g, ''); return t === '' ? 0 : /^\d{1,10}$/.test(t) ? Number(t) : null; };
+const typeChips = (id: string, v: string, current: number) => {
+  const n = parseChips(v);
+  if (n === null) { toast('Type the chips as a whole number, like 120', 'error'); updatePlayer(id, { cashOutChips: current }); return; }
+  updatePlayer(id, { cashOutChips: n });
+};
 const chipsWord = (n: number) => `${n.toLocaleString('en-US')} chip${n === 1 ? '' : 's'}`;
 /** A new real game must say what the chips are worth before anyone is added. */
+/** Another tab on this phone saved the game: this tab stopped saving so it cannot overwrite it. */
+const staleBanner = () => state.staleTab
+  ? group(h('div', { class: 'row banner stale-banner', attrs: { role: 'alert' } },
+      h('span', { class: 'grow' }, h('strong', { text: 'This game was changed in another tab' }), h('div', { class: 'muted small', text: 'Changes made here are NOT saved. Reload to continue with the latest.' })),
+      h('button', { class: 'btn primary slim', text: 'Reload', on: { click: () => location.reload() } })))
+  : null;
 const needsChipSetup = () => { const s = state.session; return !s.isDemo && s.chipsPerBuyIn === undefined && s.players.length === 0 && !s.isEnded; };
 
 // ---------------------------------------------------------------- helpers
@@ -78,7 +90,6 @@ function textInput(value: string, onChange: (v: string) => void, opts: { disable
 
 function startFresh() {
   newSession();
-  toast('Fresh table ready — add your players');
   openAddPlayer();
 }
 
@@ -103,6 +114,8 @@ function tableView(): HTMLElement {
   const locked = s.isEnded;
   const view = h('div', { class: 'view' });
   const ci = chipInfo();
+  const stale = staleBanner();
+  if (stale) view.append(stale);
 
   if (!state.storageOk) {
     view.append(h('div', { class: 'demo-card warn-top', attrs: { role: 'alert' } },
@@ -137,9 +150,9 @@ function tableView(): HTMLElement {
       h('span', { text: '🔒 Session settled and locked' }),
       h('button', { class: 'link', text: 'Reopen', on: { click: () => confirmSheet({
         title: 'Reopen session?',
-        message: `Editing will be enabled again. You can settle it again afterwards.${Object.keys(state.session.paid).length ? '\n\nChanging chips or expenses changes who pays whom, so the “paid” ticks will start again.' : ''}`,
+        message: `Editing will be enabled again. You can settle it again afterwards.${Object.keys(state.session.paid).length ? '\n\nIf chips or expenses change, the “paid” ticks for payments whose amount changed will be cleared.' : ''}`,
         confirmLabel: 'Reopen', onConfirm: reopenSession }) } }))));
-  } else if (!a.isBalanced && a.players.length > 0) {
+  } else if (!a.isBalanced && a.players.length > 0 && a.totalPlayerCashOutCents > 0) {
     const over = a.discrepancyCents > 0;
     view.append(
       h('div', { class: 'group warn-card' },
@@ -147,9 +160,9 @@ function tableView(): HTMLElement {
           h('strong', { text: ci ? `${chipsWord(Math.abs(ci.diff))} ${ci.diff > 0 ? 'too many' : 'missing'} (${formatCurrency(Math.abs(a.discrepancyCents))})` : `${formatCurrency(Math.abs(a.discrepancyCents))} ${over ? 'too many' : 'missing'}` }),
           h('span', { class: 'muted', text: ci ? 'Chips handed back ≠ chips given out' : 'Ending chips ≠ buy-ins' })),
         h('div', { class: 'seg-row' },
-          h('button', { class: 'chip', text: 'Pro-rata', on: { click: () => requestReconcile('proRataWinners', 'Pro-rata') } }),
-          h('button', { class: 'chip', text: 'Equal split', on: { click: () => requestReconcile('equalSplit', 'Equal split') } }),
-          h('button', { class: 'chip', text: 'Top winner', on: { click: () => requestReconcile('topWinner', 'Top winner') } })))
+          h('button', { class: 'chip', text: 'Spread over winners', on: { click: () => requestReconcile('proRataWinners', 'Spread over winners') } }),
+          h('button', { class: 'chip', text: 'Spread over everyone', on: { click: () => requestReconcile('equalSplit', 'Spread over everyone') } }),
+          h('button', { class: 'chip', text: 'Biggest winner covers it', on: { click: () => requestReconcile('topWinner', 'Biggest winner covers it') } })))
     );
   }
 
@@ -188,7 +201,7 @@ function tableView(): HTMLElement {
       h('span', { class: 'grow', text: 'Extra expenses (food, drinks…)' }),
       h('span', { class: 'muted mono', text: a.billsTotalCents ? formatCurrency(a.billsTotalCents) : 'None' }), h('span', { class: 'muted', text: '›' }))
   ));
-  view.append(h('div', { class: 'foot', text: 'Rake is chips the house keeps. Food and drinks go under Extra expenses so nobody enters them twice.' }));
+  view.append(h('div', { class: 'foot', text: ci ? `House cut: chips the house keeps, rounded to whole chips (1 chip = ${formatCurrency(ci.rateCents)}). Food and drinks go under Extra expenses so nobody enters them twice.` : 'Rake is chips the house keeps. Food and drinks go under Extra expenses so nobody enters them twice.' }));
 
   view.append(
     h('button', {
@@ -377,9 +390,16 @@ function stepper(id: string, buyIn: number, count: number, locked: boolean, afte
 }
 
 function confirmRemove(id: string, name: string, after?: () => void) {
+  const p = audit().players.find(x => x.id === id);
+  const played = !!p && (p.buyInCents > 0 || p.cashOutCents > 0);
+  const hasBills = (state.session.bills ?? []).some(b => b.payerId === id || b.sharedBy?.includes(id));
   confirmSheet({
-    title: `Remove ${name}?`, message: 'Their buy-ins and chips will be deleted from this session.',
-    confirmLabel: 'Remove', destructive: true, onConfirm: () => { removePlayer(id); after?.(); }
+    title: `Remove ${name}?`,
+    message: played
+      ? `${name} has ${formatCurrency(p!.buyInCents)} in the pot${p!.cashOutCents ? ` and handed back ${formatCurrency(p!.cashOutCents)}` : ''}. Removing them deletes that from the game, so everyone else’s results CHANGE (their win or loss is handed to the other players).\n\nIf ${name} is just leaving the game, keep them here, enter the chips they handed back, and settle as normal.${hasBills ? '\n\nExpenses they paid or shared will also change.' : ''}`
+      : 'They have no buy-ins yet, so nothing else changes.',
+    confirmLabel: played ? 'Remove anyway' : 'Remove', cancelLabel: played ? 'Keep in the game' : undefined, destructive: true,
+    onConfirm: () => { removePlayer(id); after?.(); }
   });
 }
 
@@ -403,7 +423,8 @@ function openRenameSheet(id: string) {
     input.value = p.name;
     const save = () => {
       const next = input.value.trim();
-      if (!next) { toast('Name can’t be empty', 'error'); input.focus(); return; }
+      const nameErr = checkPlayerName(next, id);
+      if (nameErr) { toast(nameErr, 'error'); input.focus(); return; }
       if (next !== p.name) updatePlayer(id, { name: next.slice(0, 40) });
       close();
     };
@@ -420,7 +441,7 @@ function playerRow(i: number, id: string, name: string, buyIn: number, cashOut: 
   const rate = chipRate();
   const chipsBack = rate ? Math.round(cashOut / rate) : 0;
   const cash = rate
-    ? textInput(String(chipsBack), v => updatePlayer(id, { cashOutChips: parseChips(v) }), { disabled: locked, mode: 'numeric', label: `${name} chips handed back`, fk: `cash:${id}` })
+    ? textInput(String(chipsBack), v => typeChips(id, v, chipsBack), { disabled: locked, mode: 'numeric', label: `${name} chips handed back`, fk: `cash:${id}` })
     : textInput(money(cashOut), v => updatePlayer(id, { cashOutCents: Math.max(0, toCents(v)) }), { disabled: locked, mode: 'decimal', label: `${name} ending chips`, fk: `cash:${id}` });
   cash.classList.add('mono');
   const tone = net > 0 ? 'good' : net < 0 ? 'bad' : 'muted';
@@ -449,7 +470,7 @@ function openPlayerSheet(id: string) {
       const locked = state.session.isEnded;
       const rate = chipRate();
       const cash = rate
-        ? textInput(String(Math.round(p.cashOutCents / rate)), v => { updatePlayer(id, { cashOutChips: parseChips(v) }); draw(); }, { disabled: locked, mode: 'numeric', label: 'Chips handed back' })
+        ? textInput(String(Math.round(p.cashOutCents / rate)), v => { typeChips(id, v, Math.round(p.cashOutCents / rate)); draw(); }, { disabled: locked, mode: 'numeric', label: 'Chips handed back' })
         : textInput(money(p.cashOutCents), v => { updatePlayer(id, { cashOutCents: Math.max(0, toCents(v)) }); draw(); }, { disabled: locked, mode: 'decimal', label: 'Ending chips' });
       cash.classList.add('mono');
       body.replaceChildren(
@@ -471,22 +492,31 @@ function openPlayerSheet(id: string) {
 
 /** The chip setup every real game starts with: chips per buy-in, and what a buy-in is worth in real money. */
 function openChipSetup(after?: () => void) {
+  if (document.querySelector('.sheet[aria-label="Set up the chips"]')) return;
   openSheet('Set up the chips', close => {
     const s = state.session;
     const chips = h('input', { attrs: { type: 'text', inputmode: 'numeric', placeholder: 'e.g. 40', autocomplete: 'off', 'aria-label': 'Chips per buy-in' } });
     const real = h('input', { attrs: { type: 'text', inputmode: 'decimal', placeholder: 'e.g. 10', autocomplete: 'off', 'aria-label': 'Real money per buy-in in dollars' } });
     chips.value = s.chipsPerBuyIn ? String(s.chipsPerBuyIn) : '';
-    real.value = String(s.defaultBuyIn);
+    real.value = s.chipsPerBuyIn ? String(s.defaultBuyIn) : ''; // blank on purpose: never assume what a buy-in is worth
     const preview = h('p', { class: 'chip-preview', attrs: { role: 'status', 'aria-live': 'polite' } });
     const error = h('p', { class: 'bad small', attrs: { role: 'alert' } });
-    const read = () => ({ n: parseInt(chips.value.replace(/[,\s]/g, ''), 10), m: parseBuyInUnit(real.value.replace(/[$,\s]/g, '')) });
+    const read = () => {
+      const c = chips.value.replace(/[,\s]/g, '');
+      const r = real.value.replace(/[$,\s]/g, '');
+      // only plain numbers: '40abc', '12.5 chips' or '1e3' are not guessed at
+      return { n: /^\d{1,6}$/.test(c) ? Number(c) : NaN, m: /^\d+(\.\d{1,2})?$/.test(r) ? parseBuyInUnit(r) : null };
+    };
     const update = () => {
       error.textContent = '';
       const { n, m } = read();
       const rate = m !== null && Number.isInteger(n) ? chipRateCents(m, n) : null;
+      const bothFilled = chips.value.trim() !== '' && real.value.trim() !== '';
       preview.textContent = rate !== null && m !== null
-        ? `Each player gets ${chipsWord(n)} for ${formatCurrency(toCents(m))}. 1 chip = ${formatCurrency(rate)}. Handing back ${chipsWord(n * 3)} means ${formatCurrency(rate * n * 3)}.`
-        : 'Fill in both numbers to see what one chip is worth.';
+        ? `Each player gets ${chipsWord(n)} for ${formatCurrency(toCents(m))}. 1 chip = ${formatCurrency(rate)}. Example: handing back ${chipsWord(20)} = ${formatCurrency(rate * 20)}.`
+        : bothFilled && m !== null && Number.isInteger(n)
+          ? `${formatCurrency(toCents(m))} can’t be split into exactly ${chipsWord(n)} (a chip must be worth a whole number of cents).`
+          : 'Fill in both numbers to see what one chip is worth.';
     };
     chips.addEventListener('input', update);
     real.addEventListener('input', update);
@@ -515,9 +545,12 @@ function openChipSetup(after?: () => void) {
 }
 
 function openAddPlayer() {
+  if (document.querySelector('.sheet[aria-label="Add player"]')) return; // already open (a double tap)
   if (needsChipSetup()) { openChipSetup(() => openAddPlayer()); return; }
   openSheet('Add player', close => {
-    const name = h('input', { attrs: { type: 'text', placeholder: 'Name', autocapitalize: 'words', autocomplete: 'off', 'aria-label': 'New player name', enterkeyhint: 'done' } });
+    const error = h('p', { class: 'bad small', attrs: { role: 'alert' } });
+    const added = h('p', { class: 'good small', attrs: { role: 'status' } });
+    const name = h('input', { attrs: { type: 'text', placeholder: 'e.g. Sam', autocapitalize: 'words', autocomplete: 'off', 'aria-label': 'New player name', enterkeyhint: 'done' } });
     const count = h('input', { attrs: { type: 'text', inputmode: 'decimal', value: '1', 'aria-label': 'Number of buy-ins' } });
     const countLabel = h('span', { text: `Buy-ins (× ${formatUnit(state.session.defaultBuyIn)})` });
     // On an empty table the unit can be chosen up front, before any buy-in is entered.
@@ -525,15 +558,19 @@ function openAddPlayer() {
       ? textInput(String(state.session.defaultBuyIn), v => { changeUnit(v); countLabel.textContent = `Buy-ins (× ${formatUnit(state.session.defaultBuyIn)})`; }, { mode: 'decimal', label: 'Buy-in unit for this session' })
       : null;
     const submit = (keepOpen: boolean) => {
-      const n = parseFloat(count.value);
-      addPlayer(name.value, Number.isFinite(n) ? n : 1);
+      const raw = count.value.replace(/[,\s]/g, '');
+      const n = /^\d*\.?\d+$/.test(raw) ? parseFloat(raw) : NaN;
+      const err = addPlayer(name.value, n);
+      if (err) { error.textContent = err; added.textContent = ''; (/name|player called/i.test(err) ? name : count).focus(); return; }
       haptic();
-      if (keepOpen) { name.value = ''; count.value = '1'; name.focus(); } else close();
+      error.textContent = '';
+      if (keepOpen) { added.textContent = `Added ${name.value.trim()} (${state.session.players.length} player${state.session.players.length === 1 ? '' : 's'})`; name.value = ''; count.value = '1'; name.focus(); } else close();
     };
     name.addEventListener('keydown', e => { if (e.key === 'Enter') submit(true); });
     requestAnimationFrame(() => name.focus());
     return h('div', { class: 'sheet-body' },
       group(...(unit ? [field('Buy-in unit ($)', unit)] : []), field('Name', name), h('label', { class: 'row field' }, countLabel, count)),
+      error, added,
       h('button', { class: 'btn primary block', text: 'Add & finish', on: { click: () => submit(false) } }),
       h('button', { class: 'btn tinted block', text: 'Add & next player', on: { click: () => submit(true) } }));
   });
@@ -552,8 +589,24 @@ function finishSession() {
 function requestEnd() {
   const a0 = audit();
   if (a0.players.length < 2) { toast('Add at least 2 players to settle', 'error'); return; }
+  if (a0.totalBuyInCents > 0 && a0.totalPlayerCashOutCents === 0) { toast('Enter what each player handed back first.', 'error'); return; }
   if (a0.billsTotalCents === 0 && !state.session.isEnded) { askExtraExpenses(confirmEnd); return; }
   confirmEnd();
+}
+
+/** One line per player whose count would change when the table is balanced: typed -> adjusted. */
+function adjustmentLines(): string {
+  const before = audit().players;
+  const after = previewAudit().players;
+  const rate = chipRate();
+  const lines = after.map((p, i) => {
+    const b = before[i];
+    if (!b || p.cashOutCents === b.cashOutCents) return '';
+    return rate
+      ? `• ${p.name}: ${chipsWord(Math.round(b.cashOutCents / rate))} → ${chipsWord(Math.round(p.cashOutCents / rate))}`
+      : `• ${p.name}: ${formatCurrency(b.cashOutCents)} → ${formatCurrency(p.cashOutCents)}`;
+  }).filter(Boolean);
+  return lines.length ? lines.join('\n') : '(no one’s count changes)';
 }
 
 function confirmEnd() {
@@ -562,7 +615,7 @@ function confirmEnd() {
   if (!a.isBalanced) {
     confirmSheet({
       title: chipInfo() ? `${chipsWord(Math.abs(chipInfo()!.diff))} ${chipInfo()!.diff < 0 ? 'missing' : 'too many'}` : `Chips are ${formatCurrency(Math.abs(a.discrepancyCents))} ${a.discrepancyCents < 0 ? 'short' : 'over'}`,
-      message: `${previewLines()}${a.totalPlayerCashOutCents === 0 ? 'No ending chips have been entered yet.\n\n' : ''}${chipInfo() ? `Chips handed back (${chipsWord(chipInfo()!.returned + chipInfo()!.rakeChips)}) don't match chips given out (${chipsWord(chipInfo()!.issued)}).` : `Ending chips (${formatCurrency(a.totalAccountedCents)}) don't match buy-ins (${formatCurrency(a.totalBuyInCents)}).`}\n\nContinuing will adjust payouts so the table balances (pro-rata among winners, or equally if nobody is ahead), then lock the session.`,
+      message: `${previewLines()}${chipInfo() ? `Chips handed back (${chipsWord(chipInfo()!.returned + chipInfo()!.rakeChips)}) don't match chips given out (${chipsWord(chipInfo()!.issued)}).` : `Ending chips (${formatCurrency(a.totalAccountedCents)}) don't match buy-ins (${formatCurrency(a.totalBuyInCents)}).`}\n\nContinuing will CHANGE these counts so the table balances (extra chips come off the winners, missing chips go to the winners), then lock the game:\n${adjustmentLines()}\n\nThe counts you typed stay visible on the Settle tab. To keep them exactly as typed, cancel and fix the counts first.`,
       confirmLabel: 'Balance & settle', onConfirm: finishSession
     });
     return;
@@ -578,6 +631,7 @@ function settleView(): HTMLElement {
   const s = state.session;
   const a = audit();
   const view = h('div', { class: 'view' });
+  { const stale = staleBanner(); if (stale) view.append(stale); }
   if (s.isDemo) view.append(h('div', { class: 'demo-card' }, h('div', { class: 'grow' }, h('strong', { text: '🎲 Demo mode' }), h('div', { class: 'small', text: 'Sample data — not saved to History.' })), h('button', { class: 'btn primary', text: 'Start fresh', on: { click: startFresh } })));
   const paidCount = a.transfers.filter(t => s.paid[paidKey(t.id, t.amountCents)]).length;
 
@@ -610,6 +664,8 @@ function settleView(): HTMLElement {
   if (a.transfers.length === 0 || !a.isBalanced || a.players.length < 2) {
     const msg = a.players.length < 2 ? 'Add at least 2 players to see payments'
       : !a.isBalanced ? 'Fix the chip mismatch to see payments'
+      : s.round && a.players.some(p => p.finalCents !== 0)
+        ? 'Everyone owes less than $1, so nothing needs paying (whole-dollar rounding is on).'
       : 'No payments needed 🎉';
     view.append(group(h('div', { class: 'row empty' }, h('span', { text: msg }))));
   } else {
@@ -636,12 +692,13 @@ function settleView(): HTMLElement {
     view.append(group(...csum.lines.map(l => h('div', { class: 'row chiprow' },
       h('span', { class: 'grow' },
         h('strong', { text: l.name }),
-        h('div', { class: 'muted small mono', text: `had ${chipsWord(l.issued)} (${formatCurrency(l.buyInCents)})` })),
+        h('div', { class: 'muted small mono', text: `bought in: ${chipsWord(l.issued)} (${formatCurrency(l.buyInCents)})` }),
+        ...(s.players.find(p => p.id === l.id)?.typedChips !== undefined ? [h('div', { class: 'warn small', text: `⚠️ typed ${chipsWord(s.players.find(p => p.id === l.id)!.typedChips!)}, adjusted to balance the table` })] : [])),
       h('span', { class: 'amt-col' },
-        h('span', { class: 'mono', text: `${chipsWord(l.returned)} back` }),
-        h('span', { class: `mono small ${l.netCents > 0 ? 'good' : l.netCents < 0 ? 'bad' : 'muted'}`, text: `= ${formatCurrency(l.valueCents)} → ${formatCurrency(l.netCents, true)}` })))),
-      h('div', { class: 'row' }, h('span', { class: 'muted grow', text: 'Total' }),
-        h('strong', { class: `mono ${csum.diff === 0 ? 'good' : 'bad'}`, text: `${chipsWord(csum.returned + csum.rakeChips)} back of ${chipsWord(csum.issued)}${csum.diff === 0 ? ' ✓' : ` (${csum.diff > 0 ? '+' : '−'}${Math.abs(csum.diff)})`}` }))));
+        h('span', { class: 'mono', text: `handed back: ${chipsWord(l.returned)}` }),
+        h('span', { class: `mono small ${l.netCents > 0 ? 'good' : l.netCents < 0 ? 'bad' : 'muted'}`, text: `= ${formatCurrency(l.valueCents)} → result ${formatCurrency(l.netCents, true)}` })))),
+      h('div', { class: 'row totalrow' }, h('span', { class: 'muted grow', text: 'Total' }),
+        h('strong', { class: `mono ${csum.diff === 0 ? 'good' : 'bad'}`, text: `${chipsWord(csum.returned)} handed back${csum.rakeChips ? ` + ${chipsWord(csum.rakeChips)} house cut` : ''} = ${chipsWord(csum.issued)} given out${csum.diff === 0 ? ' ✓' : ` (${csum.diff > 0 ? '+' : '−'}${Math.abs(csum.diff)})`}` }))));
   }
 
   view.append(header('Standings', a.billsTotalCents ? 'poker → after food' : ''));
@@ -665,8 +722,8 @@ function settleView(): HTMLElement {
   view.append(group(
     h('button', {
       class: 'row action', attrs: { role: 'switch', 'aria-checked': s.round === true, disabled: s.isEnded },
-      on: { click: () => setRound(!s.round) }
-    }, h('span', { class: 'grow' }, 'Round payments to whole dollars', h('div', { class: 'muted small', text: 'No more 49¢ payments. Everyone’s amounts still add up exactly.' })), h('span', { class: `switch ${s.round ? 'on' : ''}` }, h('i'))),
+      on: { click: () => { const had = Object.keys(s.paid).length > 0; setRound(!s.round); if (had) toast('Payment amounts changed, so the “paid” ticks were cleared', 'ok'); } }
+    }, h('span', { class: 'grow' }, 'Round payments to whole dollars', h('div', { class: 'muted small', text: 'Each person pays or gets up to 99¢ more or less than their exact result. Everything still adds up exactly.' })), h('span', { class: `switch ${s.round ? 'on' : ''}` }, h('i'))),
     ...(s.share && !s.isDemo ? [
       field('Note to everyone', textInput(s.note ?? '', setNote, { label: 'Note to everyone watching', fk: 'note' })),
       h('label', { class: 'row field' }, h('span', { text: 'Final link stays live for' }),
@@ -684,7 +741,7 @@ function settleView(): HTMLElement {
       copyText(text);
     } } }),
     h('div', { class: 'two' },
-      h('button', { class: 'btn tinted', text: 'Save to history', on: { click: () => { if (saveToHistory(s.isEnded ? 'Completed & Settled' : 'Saved Snapshot')) toast('Saved to History'); else toast('Demo data isn’t saved — start fresh', 'error'); } } }),
+      h('button', { class: 'btn tinted', text: 'Save to history', on: { click: () => { if (saveToHistory(s.isEnded ? 'Completed & Settled' : 'Saved Snapshot')) toast('Saved to History'); else if (s.isDemo) toast('Demo data isn’t saved — start fresh', 'error'); else toast('Could not save to History — the browser’s storage is blocked or full', 'error'); } } }),
       h('button', { class: 'btn tinted', text: 'Download .txt', on: { click: () => download(`${safeFile(s.name)}_settlement.txt`, sessionText(s)) } })),
     ...(a.isBalanced && a.players.length >= 2 ? [h('button', { class: 'btn tinted block', text: '🖼️ Save as picture', on: { click: () => sharePicture(drawSettlement(s.name, a, k => Boolean(s.paid[k])), `${safeFile(s.name)}_settlement.png`, s.name) } })] : []),
     ...(s.isEnded ? [] : [h('button', { class: 'btn plain block', text: 'End & settle…', attrs: { disabled: a.players.length < 2 }, on: { click: requestEnd } })])
