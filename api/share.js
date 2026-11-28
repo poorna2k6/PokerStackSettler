@@ -19,6 +19,16 @@ function toCents(val) {
   if (m[1]) cents = -cents;
   return cents === 0 ? 0 : cents;
 }
+var MAX_CHIPS_PER_BUYIN = 1e5;
+var MAX_CHIP_COUNT = 1e9;
+function sanitizeChipsPerBuyIn(v) {
+  const n = typeof v === "number" ? v : Number(v);
+  return Number.isInteger(n) && n >= 1 && n <= MAX_CHIPS_PER_BUYIN ? n : void 0;
+}
+var safeChipCount = (v) => {
+  const n = typeof v === "number" ? v : Number(v);
+  return Number.isFinite(n) ? Math.min(MAX_CHIP_COUNT, Math.max(0, Math.round(n))) : 0;
+};
 function cleanName(name) {
   const s = (typeof name === "string" || typeof name === "number" ? String(name) : "").trim().slice(0, MAX_NAME);
   return s || "Player";
@@ -43,7 +53,8 @@ function sanitizePlayers(raw) {
       id,
       name: cleanName(o.name),
       buyInCents: safeCents(o.buyInCents),
-      cashOutCents: safeCents(o.cashOutCents)
+      cashOutCents: safeCents(o.cashOutCents),
+      ...o.cashOutChips !== void 0 ? { cashOutChips: safeChipCount(o.cashOutChips) } : {}
     });
   });
   return out;
@@ -149,6 +160,7 @@ function sanitizeSnapshot(raw, now = Date.now()) {
   return {
     name: String(typeof o.name === "string" ? o.name : "Poker Session").trim().slice(0, 80) || "Poker Session",
     defaultBuyIn: sanitizeBuyIn(o.defaultBuyIn),
+    chipsPerBuyIn: sanitizeChipsPerBuyIn(o.chipsPerBuyIn),
     expenseCents: safeCents(o.expenseCents),
     isEnded: o.isEnded === true,
     players: sanitizePlayers(o.players),

@@ -5,6 +5,8 @@ export interface Player {
   name: string;
   buyInCents: number;
   cashOutCents: number;
+  /** chips the player handed back (only in chip-count games; cashOutCents is then chips x chip value) */
+  cashOutChips?: number;
 }
 
 export interface Transfer {
@@ -99,6 +101,57 @@ export function toCents(val: unknown): number {
 }
 
 /** "$100", "$1.50", "$0.25" */
+export const MAX_CHIPS_PER_BUYIN = 100000;
+export const MAX_CHIP_COUNT = 1_000_000_000;
+
+/**
+ * What one chip is worth in whole cents, or null when the chips do not divide the buy-in evenly (for example
+ * $10 over 30 chips is 33.33 cents). Whole cents keep every payout exact: no rounding anywhere.
+ */
+export function chipRateCents(unitDollars: number, chipsPerBuyIn: number): number | null {
+  const unit = toCents(unitDollars);
+  if (!Number.isInteger(chipsPerBuyIn) || chipsPerBuyIn < 1 || chipsPerBuyIn > MAX_CHIPS_PER_BUYIN) return null;
+  return unit > 0 && unit % chipsPerBuyIn === 0 ? unit / chipsPerBuyIn : null;
+}
+
+export function sanitizeChipsPerBuyIn(v: unknown): number | undefined {
+  const n = typeof v === 'number' ? v : Number(v);
+  return Number.isInteger(n) && n >= 1 && n <= MAX_CHIPS_PER_BUYIN ? n : undefined;
+}
+
+export const safeChipCount = (v: unknown): number => {
+  const n = typeof v === 'number' ? v : Number(v);
+  return Number.isFinite(n) ? Math.min(MAX_CHIP_COUNT, Math.max(0, Math.round(n))) : 0;
+};
+
+export interface ChipLine { id: string; name: string; issued: number; returned: number; buyInCents: number; valueCents: number; netCents: number }
+export interface ChipSummary {
+  rateCents: number;
+  perBuyIn: number;
+  lines: ChipLine[];
+  issued: number;
+  returned: number;
+  /** chips the house keeps (rake) */
+  rakeChips: number;
+  /** returned + rake - issued: 0 when every chip is accounted for; negative = chips missing */
+  diff: number;
+}
+
+/** Chip counts for a chip-count game: how many chips each player was given and handed back, and what that is worth. */
+export function chipSummary(players: Player[], unitDollars: number, perBuyIn: number, rakeCents = 0): ChipSummary | null {
+  const rate = chipRateCents(unitDollars, perBuyIn);
+  if (rate === null) return null;
+  const lines = players.map(p => {
+    const issued = Math.round(Math.max(0, p.buyInCents) / rate);
+    const returned = p.cashOutChips !== undefined ? safeChipCount(p.cashOutChips) : Math.round(Math.max(0, p.cashOutCents) / rate);
+    return { id: p.id, name: p.name, issued, returned, buyInCents: Math.max(0, p.buyInCents), valueCents: returned * rate, netCents: returned * rate - Math.max(0, p.buyInCents) };
+  });
+  const issued = lines.reduce((a, l) => a + l.issued, 0);
+  const returned = lines.reduce((a, l) => a + l.returned, 0);
+  const rakeChips = Math.round(Math.max(0, rakeCents) / rate);
+  return { rateCents: rate, perBuyIn, lines, issued, returned, rakeChips, diff: returned + rakeChips - issued };
+}
+
 export function formatUnit(dollars: number): string {
   const digits = Number.isInteger(dollars) ? 0 : 2;
   return `$${dollars.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
@@ -336,6 +389,18 @@ export function solve(
   };
 }
 
+/**
+ * The chip fixes for a chip-count game: the same pro-rata / equal / top-winner rules, but applied to chip COUNTS, so
+ * every player still ends up with a whole number of chips and exact money (chips x chip value).
+ */
+export function reconcileChips(players: Player[], rakeCents: number, mode: ReconcileMode, unitDollars: number, perBuyIn: number): Player[] {
+  const sum = chipSummary(players, unitDollars, perBuyIn, rakeCents);
+  if (!sum || sum.diff === 0) return players;
+  const pseudo: Player[] = sum.lines.map(l => ({ id: l.id, name: l.name, buyInCents: l.issued, cashOutCents: l.returned }));
+  const fixed = reconcile(pseudo, sum.rakeChips, mode, 1);
+  return players.map((p, i) => ({ ...p, cashOutChips: fixed[i].cashOutCents, cashOutCents: fixed[i].cashOutCents * sum.rateCents }));
+}
+
 /** Returns new players whose cash-outs add up to buy-ins minus the expense pot. */
 export function reconcile(
   players: Player[],
@@ -424,7 +489,8 @@ export function sanitizePlayers(raw: unknown): Player[] {
       id,
       name: cleanName(o.name),
       buyInCents: safeCents(o.buyInCents),
-      cashOutCents: safeCents(o.cashOutCents)
+      cashOutCents: safeCents(o.cashOutCents),
+      ...(o.cashOutChips !== undefined ? { cashOutChips: safeChipCount(o.cashOutChips) } : {})
     });
   });
   return out;
@@ -467,6 +533,8 @@ export function sanitizeBills(raw: unknown): Bill[] {
 }
 
 export interface SessionData {
+  /** chips handed out per buy-in; set at the start of a chip-count game */
+  chipsPerBuyIn?: number;
   id: string;
   name: string;
   defaultBuyIn: number;
@@ -506,6 +574,7 @@ export function sanitizeLog(raw: unknown): LogEntry[] {
 }
 
 export interface SavedSession {
+  chipsPerBuyIn?: number;
   id: string;
   name: string;
   timestamp: string;
@@ -553,6 +622,7 @@ export function sanitizeSaved(raw: unknown): SavedSession | null {
     name: String(o.name ?? 'Restored Session').slice(0, 80),
     timestamp: String(o.timestamp ?? '').slice(0, 32),
     status: String(o.status ?? 'Saved Snapshot').slice(0, 40),
+    chipsPerBuyIn: sanitizeChipsPerBuyIn(o.chipsPerBuyIn),
     defaultBuyIn: sanitizeBuyIn(o.defaultBuyIn),
     expenseCents: safeCents(o.expenseCents),
     players,
@@ -605,6 +675,7 @@ export function buildNotepad(s: SavedSession | (SessionData & { timestamp?: stri
     ('status' in s && s.status) || ('isEnded' in s && s.isEnded ? 'Completed & Settled' : 'Live Auto-Saved');
   const bar = '='.repeat(64);
   const dash = '-'.repeat(64);
+  const chips = s.chipsPerBuyIn ? chipSummary(s.players, s.defaultBuyIn, s.chipsPerBuyIn, expense) : null;
 
   const lines = [
     bar,
@@ -614,6 +685,7 @@ export function buildNotepad(s: SavedSession | (SessionData & { timestamp?: stri
     `Saved Timestamp: ${stamp}`,
     `Session Status : ${status}`,
     `1 Buy-In Unit  : ${formatUnit(s.defaultBuyIn)}`,
+    ...(chips ? [`Chips          : ${chips.perBuyIn} chips per buy-in; 1 chip = ${formatCurrency(chips.rateCents)}`] : []),
     ...(audit.expenseCents > 0 ? [`Rake / Expense: ${formatCurrency(audit.expenseCents)} (paid to House / Expense Pot)`] : []),
     `Total Table Pot: ${formatCurrency(audit.totalBuyInCents)} (${formatBuyInCount(audit.totalBuyInCount)} across ${audit.players.length} players)`,
     `Table Balance  : ${audit.isBalanced ? 'BALANCED' : 'DISCREPANCY ' + formatCurrency(audit.discrepancyCents, true)}`,
@@ -644,6 +716,11 @@ export function buildNotepad(s: SavedSession | (SessionData & { timestamp?: stri
     audit.players.forEach(p => lines.push([p.name.slice(0, 19).padEnd(20), formatCurrency(p.netCents, true).padStart(9), formatCurrency(p.paidCents).padStart(9), formatCurrency(-p.shareCents).padStart(9), formatCurrency(p.finalCents, true).padStart(9)].join(' ')));
     audit.guests.forEach(g => lines.push([`${g.name.slice(0, 15)} (guest)`.padEnd(20), ''.padStart(9), formatCurrency(g.paidCents).padStart(9), formatCurrency(-g.shareCents).padStart(9), formatCurrency(g.finalCents, true).padStart(9)].join(' ')));
   }
+  if (chips) {
+    lines.push(dash, 'CHIPS HANDED BACK', dash);
+    chips.lines.forEach(l => lines.push(`${l.name.slice(0, 19).padEnd(20)} had ${String(l.issued).padStart(6)} chips, returned ${String(l.returned).padStart(6)} chips = ${formatCurrency(l.valueCents)} (net ${formatCurrency(l.netCents, true)})`));
+    lines.push(`Total: ${chips.issued} chips given out, ${chips.returned}${chips.rakeChips ? ` + ${chips.rakeChips} rake` : ''} chips returned${chips.diff ? ` (${chips.diff > 0 ? chips.diff + ' too many' : -chips.diff + ' missing'})` : ' — all accounted for'}`);
+  }
   lines.push(dash, `2. WHO PAYS WHOM (${audit.transfers.length} transfers)`, dash);
   if (audit.transfers.length === 0) lines.push('* No payments needed.');
   audit.transfers.forEach((t, i) =>
@@ -654,6 +731,7 @@ export function buildNotepad(s: SavedSession | (SessionData & { timestamp?: stri
     name: s.name,
     defaultBuyIn: s.defaultBuyIn,
     expenseCents: expense,
+    chipsPerBuyIn: s.chipsPerBuyIn,
     players: s.players,
     bills: s.bills ?? [],
     round: 'round' in s && s.round === true
@@ -665,7 +743,8 @@ export function buildNotepad(s: SavedSession | (SessionData & { timestamp?: stri
 export function buildReceipt(
   name: string,
   audit: Audit,
-  paid: Record<string, boolean>
+  paid: Record<string, boolean>,
+  chips?: ChipSummary | null
 ): string {
   const lines = [`♠️ ${name} — Final Settlement`, ''];
   if (audit.transfers.length === 0) lines.push('No payments needed.');
@@ -676,7 +755,7 @@ export function buildReceipt(
   [...audit.players]
     .sort((a, b) => b.netCents - a.netCents)
     .forEach(p =>
-      lines.push(`• ${p.name} [${formatBuyInCount(p.buyInCount)}]: ${formatCurrency(p.netCents, true)}${audit.billsTotalCents > 0 ? ` → ${formatCurrency(p.finalCents, true)} after food & drinks` : ''}`)
+      lines.push(`• ${p.name} [${formatBuyInCount(p.buyInCount)}]: ${chips ? `${chips.lines.find(l => l.id === p.id)?.returned ?? 0} chips back = ${formatCurrency(p.cashOutCents)} → ` : ''}${formatCurrency(p.netCents, true)}${audit.billsTotalCents > 0 ? ` → ${formatCurrency(p.finalCents, true)} after food & drinks` : ''}`)
     );
   audit.guests.forEach(g => lines.push(`• ${g.name} (not playing, food & drinks): ${formatCurrency(g.finalCents, true)}`));
   return lines.join('\n');

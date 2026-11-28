@@ -1,5 +1,5 @@
 import { normalizeCode } from './shared';
-import { sanitizeBills, sanitizeLog, sanitizeBuyIn, sanitizePaid, sanitizePlayers, sanitizeSaved, toCents, uniqueSessionIds, type SavedSession, type SessionData } from './engine';
+import { sanitizeBills, sanitizeChipsPerBuyIn, sanitizeLog, sanitizeBuyIn, sanitizePaid, sanitizePlayers, sanitizeSaved, toCents, uniqueSessionIds, type SavedSession, type SessionData } from './engine';
 
 const VAULT_KEY = 'stacksettle_pro_vault_v2';
 const LIVE_KEY = 'stacksettle_live_autosave_v1';
@@ -56,6 +56,7 @@ export function loadLive(): SessionData | null {
     id: typeof o.sessionId === 'string' ? o.sessionId : typeof o.id === 'string' ? o.id : 'sess_live',
     name: String(o.sessionName ?? o.name ?? 'Poker Session').slice(0, 80),
     defaultBuyIn: sanitizeBuyIn(o.defaultBuyIn),
+    chipsPerBuyIn: sanitizeChipsPerBuyIn(o.chipsPerBuyIn),
     expenseCents,
     isEnded: o.isEnded === true,
     isDemo: o.isDemo === true,
@@ -72,7 +73,7 @@ export function loadLive(): SessionData | null {
 
 export const saveLive = (s: SessionData) =>
   write(LIVE_KEY, {
-    id: s.id, name: s.name, defaultBuyIn: s.defaultBuyIn, expenseCents: s.expenseCents,
+    id: s.id, name: s.name, defaultBuyIn: s.defaultBuyIn, chipsPerBuyIn: s.chipsPerBuyIn, expenseCents: s.expenseCents,
     isEnded: s.isEnded, isDemo: s.isDemo === true, share: s.share, players: s.players, paid: s.paid, bills: s.bills ?? [], log: s.log ?? [], note: s.note ?? '', finalTtl: s.finalTtl, round: s.round === true
   });
 

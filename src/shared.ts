@@ -1,9 +1,11 @@
 // Types and validation shared by the app (host + viewer) and the /api/share function.
-import { sanitizeBills, sanitizeLog, sanitizeBuyIn, sanitizePaid, sanitizePlayers, safeCents, type Bill, type LogEntry, type Player } from './engine';
+import { sanitizeBills, sanitizeChipsPerBuyIn, sanitizeLog, sanitizeBuyIn, sanitizePaid, sanitizePlayers, safeCents, type Bill, type LogEntry, type Player } from './engine';
 
 export interface SharedSnapshot {
   name: string;
   defaultBuyIn: number;
+  /** chips per buy-in in a chip-count game */
+  chipsPerBuyIn?: number;
   expenseCents: number;
   isEnded: boolean;
   players: Player[];
@@ -72,6 +74,7 @@ export function sanitizeSnapshot(raw: unknown, now = Date.now()): SharedSnapshot
   return {
     name: String(typeof o.name === 'string' ? o.name : 'Poker Session').trim().slice(0, 80) || 'Poker Session',
     defaultBuyIn: sanitizeBuyIn(o.defaultBuyIn),
+    chipsPerBuyIn: sanitizeChipsPerBuyIn(o.chipsPerBuyIn),
     expenseCents: safeCents(o.expenseCents),
     isEnded: o.isEnded === true,
     players: sanitizePlayers(o.players),

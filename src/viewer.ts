@@ -3,7 +3,7 @@
 import { h, openSheet, toast } from './dom';
 import { openHandsSheet } from './hands';
 import { drawSettlement, sharePicture } from './picture';
-import { formatBuyInCount, formatCurrency, formatUnit, paidKey, solve } from './engine';
+import { chipSummary, formatBuyInCount, formatCurrency, formatUnit, paidKey, solve, type ChipSummary } from './engine';
 import { makeHostKey } from './keys';
 import { formatCode, normalizeCode, type PublicOffer, type SharedSnapshot } from './shared';
 import { THEMES, loadTheme } from './storage';
@@ -36,6 +36,9 @@ export function mountViewer(rawCode: string) {
   let view: 'table' | 'list' = 'table';
   let statusEl: HTMLElement | null = null;
   let freshEl: HTMLElement | null = null;
+  let chips: ChipSummary | null = null; // chip counts of a chip-count game (null for a plain dollar game)
+  const chipsOf = (id: string) => chips?.lines.find(l => l.id === id);
+  const chipsWord = (n: number) => `${n.toLocaleString('en-US')} chip${n === 1 ? '' : 's'}`;
   let claims: string[] = []; // "I paid" requests waiting for the host (from the server)
   let validUntil: number | undefined;
   let lastChangeAt = Date.now(); // when this page last saw the table change (drives the slower polling)
@@ -148,6 +151,7 @@ export function mountViewer(rawCode: string) {
       return [group(h('div', { class: 'row empty' }, h('span', { text: phase === 'offline' ? 'Can’t reach the server — retrying…' : 'Loading the table…' })))];
     }
     const a = solve(snap.players, snap.expenseCents, snap.defaultBuyIn, snap.bills ?? [], snap.round === true);
+    chips = snap.chipsPerBuyIn ? chipSummary(snap.players, snap.defaultBuyIn, snap.chipsPerBuyIn, snap.expenseCents) : null;
     const out: Node[] = [
       h('div', { class: 'demo-card view-only' },
         h('div', { class: 'grow' }, h('strong', { text: '👀 View only' }), h('span', { class: 'small', text: ' — only the host can make changes' })))
@@ -158,8 +162,10 @@ export function mountViewer(rawCode: string) {
     out.push(h('button', { class: 'btn tinted block slim', text: '🃏 New to poker? How hands rank', on: { click: openHandsSheet } }));
     out.push(h('div', { class: 'kpis' },
       kpi('Players', String(a.players.length)),
-      kpi('Pot', formatCurrency(a.totalBuyInCents), `${a.totalBuyInCount} buy-in${a.totalBuyInCount === 1 ? '' : 's'}`),
-      kpi('Chips out', formatCurrency(a.totalAccountedCents), a.isBalanced ? 'Balanced ✓' : formatCurrency(a.discrepancyCents, true), a.isBalanced ? 'good' : 'warn')));
+      kpi('Pot', formatCurrency(a.totalBuyInCents), chips ? `${chipsWord(chips.issued)} given out` : `${a.totalBuyInCount} buy-in${a.totalBuyInCount === 1 ? '' : 's'}`),
+      chips
+        ? kpi('Chips back', chipsWord(chips.returned + chips.rakeChips), chips.diff === 0 ? 'Balanced ✓' : `${chips.diff > 0 ? '+' : '−'}${Math.abs(chips.diff).toLocaleString('en-US')} chips`, chips.diff === 0 ? 'good' : 'warn')
+        : kpi('Chips out', formatCurrency(a.totalAccountedCents), a.isBalanced ? 'Balanced ✓' : formatCurrency(a.discrepancyCents, true), a.isBalanced ? 'good' : 'warn')));
 
     const seg = h('div', { class: 'segmented', attrs: { role: 'tablist', 'aria-label': 'Player view' } },
       ...(['table', 'list'] as const).map(m => h('button', {
@@ -178,7 +184,7 @@ export function mountViewer(rawCode: string) {
       out.push(ovalTable({
         a,
         label: p => `${p.name}: ${formatBuyInCount(p.buyInCount)} in, chips ${formatCurrency(p.cashOutCents)}, net ${formatCurrency(p.netCents, true)}. Tap for details.`,
-        onSeat: p => openSeatDetails(p, snap!.defaultBuyIn),
+        onSeat: p => openSeatDetails({ ...p, chipsGiven: chipsOf(p.id)?.issued, chipsBack: chipsOf(p.id)?.returned }, snap!.defaultBuyIn),
         note: p => `${formatBuyInCount(p.buyInCount)} · ${formatCurrency(p.buyInCents)}`,
         hint: 'Tap a seat for details',
         highlightId: meId ?? undefined
@@ -193,7 +199,7 @@ export function mountViewer(rawCode: string) {
           h('span', { class: `net mono ${p.netCents > 0 ? 'good' : p.netCents < 0 ? 'bad' : 'muted'}`, text: formatCurrency(p.netCents, true) })),
         h('div', { class: 'view-meta mono' },
           h('span', { text: `In: ${formatBuyInCount(p.buyInCount)} · ${formatCurrency(p.buyInCents)}` }),
-          h('span', { text: `Chips: ${formatCurrency(p.cashOutCents)}` }))))));
+          h('span', { text: chipsOf(p.id) ? `Back: ${chipsWord(chipsOf(p.id)!.returned)} = ${formatCurrency(p.cashOutCents)}` : `Chips: ${formatCurrency(p.cashOutCents)}` }))))));
     }
 
     if (a.expenseCents > 0) {
@@ -288,12 +294,13 @@ export function mountViewer(rawCode: string) {
       h('button', { class: 'btn plain block', text: 'Cancel', on: { click: close } })));
   }
 
-  function openSeatDetails(p: { name: string; buyInCount: number; buyInCents: number; cashOutCents: number; netCents: number }, unit: number) {
+  function openSeatDetails(p: { name: string; buyInCount: number; buyInCents: number; cashOutCents: number; netCents: number; chipsGiven?: number; chipsBack?: number }, unit: number) {
     openSheet(p.name, close => h('div', { class: 'sheet-body' },
       group(
         h('div', { class: 'row' }, h('span', { class: 'muted', text: 'Buy-ins' }), h('strong', { class: 'mono grow right', text: `${formatBuyInCount(p.buyInCount)} (${formatUnit(unit)} each)` })),
         h('div', { class: 'row' }, h('span', { class: 'muted', text: 'Total in' }), h('strong', { class: 'mono grow right', text: formatCurrency(p.buyInCents) })),
-        h('div', { class: 'row' }, h('span', { class: 'muted', text: 'Chips' }), h('strong', { class: 'mono grow right', text: formatCurrency(p.cashOutCents) })),
+        ...(p.chipsGiven !== undefined ? [h('div', { class: 'row' }, h('span', { class: 'muted', text: 'Chips given' }), h('strong', { class: 'mono grow right', text: chipsWord(p.chipsGiven) }))] : []),
+        h('div', { class: 'row' }, h('span', { class: 'muted', text: p.chipsBack !== undefined ? 'Chips handed back' : 'Chips' }), h('strong', { class: 'mono grow right', text: p.chipsBack !== undefined ? `${chipsWord(p.chipsBack)} = ${formatCurrency(p.cashOutCents)}` : formatCurrency(p.cashOutCents) })),
         h('div', { class: 'row' }, h('span', { class: 'muted', text: 'Net' }),
           h('strong', { class: `mono grow right ${p.netCents > 0 ? 'good' : p.netCents < 0 ? 'bad' : 'muted'}`, text: formatCurrency(p.netCents, true) }))),
       h('p', { class: 'muted small', text: 'View only — the host updates these numbers.' }),

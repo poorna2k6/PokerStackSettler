@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildNotepad, buildReceipt, buyInCount, paidKey, uniqueSessionIds, formatUnit, leaderboard, parseBuyInUnit, sanitizeBuyIn, parseBackup, reconcile, sanitizePlayers, settleNodes, solve,
-  formatCurrency, toCents, splitEvenly, sanitizeBills, roundToDollars, sanitizeSaved, MAX_BILL_CENTS, type Player
+  formatCurrency, toCents, splitEvenly, sanitizeBills, roundToDollars, sanitizeSaved, chipRateCents, chipSummary, reconcileChips, sanitizeChipsPerBuyIn, MAX_BILL_CENTS, type Player
 } from './engine';
 
 const P = (id: string, bi: number, co: number): Player => ({ id, name: id, buyInCents: bi, cashOutCents: co });
@@ -432,5 +432,70 @@ describe('History keeps the whole-dollar choice', () => {
     expect(text).toContain('0 transfers');
     const back = parseBackup(text);
     expect(back?.kind === 'session' && back.session.round).toBe(true);
+  });
+});
+
+describe('chip-count games (chips are not dollars)', () => {
+  const pl = (id: string, buyIns: number, chips: number, unit = 1000, per = 40) => ({ id, name: id.toUpperCase(), buyInCents: buyIns * unit, cashOutCents: chips * (unit / per), cashOutChips: chips });
+
+  it('a chip is worth a whole number of cents or the setup is refused', () => {
+    expect(chipRateCents(10, 40)).toBe(25);
+    expect(chipRateCents(10, 100)).toBe(10);
+    expect(chipRateCents(10, 30)).toBeNull();   // 33.33 cents
+    expect(chipRateCents(10, 0)).toBeNull();
+    expect(chipRateCents(10, 2.5)).toBeNull();
+    expect(chipRateCents(0, 40)).toBeNull();
+    expect(sanitizeChipsPerBuyIn('40')).toBe(40);
+    expect(sanitizeChipsPerBuyIn(-1)).toBeUndefined();
+    expect(sanitizeChipsPerBuyIn(1e9)).toBeUndefined();
+  });
+
+  it('40 chips for $10: money is exactly chips x 25 cents', () => {
+    const players = [pl('a', 2, 120), pl('b', 2, 40)];            // 80 chips each issued; a returns 120, b returns 40
+    const s = chipSummary(players, 10, 40)!;
+    expect(s.issued).toBe(160);
+    expect(s.returned).toBe(160);
+    expect(s.diff).toBe(0);
+    expect(s.lines[0].valueCents).toBe(3000);                     // 120 chips x $0.25
+    expect(s.lines[0].netCents).toBe(1000);                       // +$10
+    const a = solve(players, 0, 10);
+    expect(a.isBalanced).toBe(true);
+    expect(a.transfers).toHaveLength(1);
+    expect(a.transfers[0].amountCents).toBe(1000);
+  });
+
+  it('reports chips missing / too many, not dollars', () => {
+    const missing = chipSummary([pl('a', 2, 100), pl('b', 2, 40)], 10, 40)!;
+    expect(missing.diff).toBe(-20);
+    const over = chipSummary([pl('a', 2, 150), pl('b', 2, 40)], 10, 40)!;
+    expect(over.diff).toBe(30);
+  });
+
+  it('reconciling works on whole chips and always lands on exact money', () => {
+    let seed = 99;
+    const rnd = (n: number) => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; };
+    for (const mode of ['proRataWinners', 'equalSplit', 'topWinner'] as const) {
+      for (let t = 0; t < 150; t++) {
+        const n = 2 + rnd(7);
+        const players = Array.from({ length: n }, (_, i) => pl(`p${i}`, 1 + rnd(5), rnd(400)));
+        const out = reconcileChips(players, 0, mode, 10, 40);
+        const s = chipSummary(out, 10, 40)!;
+        out.forEach(p => { expect(Number.isInteger(p.cashOutChips)).toBe(true); expect(p.cashOutChips!).toBeGreaterThanOrEqual(0); expect(p.cashOutCents).toBe(p.cashOutChips! * 25); });
+        if (s.issued >= 0) expect(s.diff).toBe(0);
+        expect(solve(out, 0, 10).isBalanced).toBe(true);
+      }
+    }
+  });
+
+  it('the notepad and receipt say chips and money', () => {
+    const players = [pl('a', 2, 120), pl('b', 2, 40)];
+    const text = buildNotepad({ id: 's', name: 'G', defaultBuyIn: 10, chipsPerBuyIn: 40, expenseCents: 0, isEnded: false, paid: {}, players });
+    expect(text).toContain('40 chips per buy-in');
+    expect(text).toContain('returned    120 chips = $30.00');
+    const back = parseBackup(text);
+    expect(back?.kind === 'session' && back.session.chipsPerBuyIn).toBe(40);
+    expect(back?.kind === 'session' && back.session.players[0].cashOutChips).toBe(120);
+    const receipt = buildReceipt('G', solve(players, 0, 10), {}, chipSummary(players, 10, 40));
+    expect(receipt).toContain('120 chips back = $30.00');
   });
 });

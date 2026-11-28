@@ -1,5 +1,5 @@
 import {
-  MAX_BILLS, MAX_GUESTS, MAX_BILL_CENTS, MAX_LOG, formatCurrency, buildNotepad, parseBackup, parseBuyInUnit, reconcile, solve, toCents,
+  MAX_BILLS, MAX_GUESTS, MAX_BILL_CENTS, MAX_LOG, MAX_CHIPS_PER_BUYIN, chipRateCents, chipSummary, reconcileChips, safeChipCount, formatCurrency, buildNotepad, parseBackup, parseBuyInUnit, reconcile, solve, toCents,
   type Bill, type Player, type ReconcileMode, type SavedSession, type SessionData
 } from './engine';
 import { PRESETS, type Preset } from './presets';
@@ -96,11 +96,11 @@ function replaceSession(next: SessionData) {
  * Becoming the host of a table someone else was running. The table that was open on this phone is kept in
  * History first, so nothing is lost.
  */
-export function adoptSharedSession(s: { name: string; defaultBuyIn: number; expenseCents: number; isEnded: boolean; players: Player[]; paid: Record<string, boolean>; bills?: Bill[]; log?: { t: number; m: string }[]; note?: string; round?: boolean }, share: NonNullable<SessionData['share']>) {
+export function adoptSharedSession(s: { name: string; defaultBuyIn: number; expenseCents: number; isEnded: boolean; players: Player[]; paid: Record<string, boolean>; bills?: Bill[]; log?: { t: number; m: string }[]; note?: string; round?: boolean; chipsPerBuyIn?: number }, share: NonNullable<SessionData['share']>) {
   const cur = state.session;
   if (!cur.isDemo && cur.players.length > 0 && cur.share?.code !== share.code) saveToHistory('Saved before taking over a table');
   replaceSession({
-    id: uid('sess'), name: s.name, defaultBuyIn: s.defaultBuyIn, expenseCents: s.expenseCents, isEnded: s.isEnded,
+    id: uid('sess'), name: s.name, defaultBuyIn: s.defaultBuyIn, chipsPerBuyIn: s.chipsPerBuyIn, expenseCents: s.expenseCents, isEnded: s.isEnded,
     isDemo: false, share, players: s.players.map(p => ({ ...p })), paid: { ...s.paid }, bills: (s.bills ?? []).map(b => ({ ...b })), log: (s.log ?? []).map(e => ({ ...e })), note: s.note ?? '', round: s.round === true
   });
   state.tab = 'table';
@@ -120,7 +120,7 @@ export function setShare(share: SessionData['share']) {
 export function shareSnapshot() {
   const s = state.session;
   return {
-    name: s.name, defaultBuyIn: s.defaultBuyIn, expenseCents: s.expenseCents,
+    name: s.name, defaultBuyIn: s.defaultBuyIn, chipsPerBuyIn: s.chipsPerBuyIn, expenseCents: s.expenseCents,
     isEnded: s.isEnded, players: s.players, paid: s.paid, bills: s.bills ?? [], log: s.log ?? [], note: s.note ?? '', round: s.round === true
   };
 }
@@ -138,11 +138,53 @@ export function setName(name: string) { state.session.name = name.trim().slice(0
 /** Returns false (and keeps the old unit) when the value is invalid. */
 export function setUnit(v: string): boolean {
   const n = parseBuyInUnit(v);
+  if (state.session.chipsPerBuyIn) return true; // in a chip-count game the buy-in value is set with the chips
   if (n !== null) state.session.defaultBuyIn = n;
   commit();
   return n !== null;
 }
-export function setExpense(v: string) { state.session.expenseCents = Math.max(0, toCents(v)); commit(); }
+export function setExpense(v: string) {
+  let cents = Math.max(0, toCents(v));
+  const rate = chipRate();
+  if (rate) cents = Math.round(cents / rate) * rate; // the rake is chips the house keeps: a whole number of chips
+  state.session.expenseCents = cents;
+  commit();
+}
+
+/** What one chip is worth in cents in this game, or null when the game is not a chip-count game. */
+export function chipRate(): number | null {
+  const s = state.session;
+  return s.chipsPerBuyIn ? chipRateCents(s.defaultBuyIn, s.chipsPerBuyIn) : null;
+}
+/** Chip counts for the open game (null when it is a plain dollar game). */
+export const chipInfo = () => {
+  const s = state.session;
+  return s.chipsPerBuyIn ? chipSummary(s.players, s.defaultBuyIn, s.chipsPerBuyIn, s.expenseCents) : null;
+};
+
+/**
+ * Sets up a chip-count game: how many chips each buy-in gives and what the buy-in is worth in real money.
+ * Returns an error message, or null when saved. Only possible before anyone has bought in.
+ */
+export function setupChips(chipsPerBuyIn: number, unitDollars: number): string | null {
+  const s = state.session;
+  const unit = parseBuyInUnit(unitDollars);
+  if (unit === null) return 'Enter what one buy-in is worth in real money, for example 10.';
+  if (!Number.isInteger(chipsPerBuyIn) || chipsPerBuyIn < 1) return 'Enter how many chips one buy-in gives, for example 40.';
+  if (chipsPerBuyIn > MAX_CHIPS_PER_BUYIN) return `Use at most ${MAX_CHIPS_PER_BUYIN.toLocaleString()} chips per buy-in.`;
+  if (chipRateCents(unit, chipsPerBuyIn) === null) {
+    const cents = toCents(unit);
+    const near = [...Array(chipsPerBuyIn + 40).keys()].map(i => i + 1).filter(n => cents % n === 0).sort((a, b) => Math.abs(a - chipsPerBuyIn) - Math.abs(b - chipsPerBuyIn)).slice(0, 3).sort((a, b) => a - b);
+    return `${formatCurrency(cents)} can’t be split into exactly ${chipsPerBuyIn} chips (a chip must be worth a whole number of cents). Try ${near.join(', ')} chips instead.`;
+  }
+  if (s.players.some(p => p.buyInCents > 0)) return 'Chips can only be changed before anyone has bought in.';
+  s.defaultBuyIn = unit;
+  s.chipsPerBuyIn = chipsPerBuyIn;
+  s.players.forEach(p => { p.cashOutChips = 0; p.cashOutCents = 0; });
+  s.expenseCents = 0;
+  commit();
+  return null;
+}
 
 /** Remember something that happened, so viewers can see the game moving (last MAX_LOG entries). */
 function note(m: string) {
@@ -224,6 +266,16 @@ export function removeBill(id: string) {
 }
 export function updatePlayer(id: string, patch: Partial<Player>) {
   const p = state.session.players.find(x => x.id === id);
+  const rate = chipRate();
+  if (p && rate && patch.cashOutChips !== undefined) {
+    // chip-count game: the chips are what is typed, the money is always chips x chip value
+    const chips = safeChipCount(patch.cashOutChips);
+    if (chips !== (p.cashOutChips ?? 0)) note(`${p.name} returned ${chips} chips`);
+    p.cashOutChips = chips;
+    p.cashOutCents = chips * rate;
+    commit();
+    return;
+  }
   if (p && patch.cashOutCents !== undefined && patch.cashOutCents !== p.cashOutCents) note(`${p.name} chips ${formatCurrency(patch.cashOutCents)}`);
   if (p) Object.assign(p, patch);
   commit();
@@ -238,7 +290,10 @@ export function rebuy(id: string, delta: number) {
 }
 
 export function applyReconcile(mode: ReconcileMode) {
-  state.session.players = reconcile(state.session.players, state.session.expenseCents, mode, state.session.defaultBuyIn);
+  const s = state.session;
+  s.players = s.chipsPerBuyIn
+    ? reconcileChips(s.players, s.expenseCents, mode, s.defaultBuyIn, s.chipsPerBuyIn)
+    : reconcile(s.players, s.expenseCents, mode, s.defaultBuyIn);
   commit();
 }
 
@@ -257,7 +312,7 @@ function snapshot(status: string): SavedSession {
   const s = state.session;
   return {
     id: s.id, name: s.name, timestamp: stamp(), status,
-    defaultBuyIn: s.defaultBuyIn, expenseCents: s.expenseCents,
+    defaultBuyIn: s.defaultBuyIn, chipsPerBuyIn: s.chipsPerBuyIn, expenseCents: s.expenseCents,
     players: s.players.map(p => ({ ...p })),
     paid: { ...s.paid },
     bills: (s.bills ?? []).map(b => ({ ...b })),
@@ -284,7 +339,9 @@ export function saveToHistory(status = 'Saved Snapshot'): SavedSession | null {
 export function endSession(): boolean {
   if (!audit().isBalanced) {
     const s = state.session;
-    const fixed = reconcile(s.players, s.expenseCents, 'proRataWinners', s.defaultBuyIn);
+    const fixed = s.chipsPerBuyIn
+      ? reconcileChips(s.players, s.expenseCents, 'proRataWinners', s.defaultBuyIn, s.chipsPerBuyIn)
+      : reconcile(s.players, s.expenseCents, 'proRataWinners', s.defaultBuyIn);
     // Only keep the adjustment if it actually balances; a refusal must not alter what the user typed.
     if (!solve(fixed, s.expenseCents, s.defaultBuyIn).isBalanced) return false;
     s.players = fixed;
@@ -308,7 +365,7 @@ export function loadSaved(id: string) {
   const s = state.saved.find(x => x.id === id);
   if (!s) return;
   replaceSession({
-    id: s.id, name: s.name, defaultBuyIn: s.defaultBuyIn, expenseCents: s.expenseCents,
+    id: s.id, name: s.name, defaultBuyIn: s.defaultBuyIn, chipsPerBuyIn: s.chipsPerBuyIn, expenseCents: s.expenseCents,
     isEnded: s.status.startsWith('Completed'), isDemo: false, players: s.players.map(p => ({ ...p })), paid: { ...(s.paid ?? {}) }, bills: (s.bills ?? []).map(b => ({ ...b })), round: s.round === true
   });
   state.tab = 'table';
@@ -344,7 +401,7 @@ export function importBackup(text: string): string | null {
   }
   const s = parsed.session;
   replaceSession({
-    id: s.id, name: s.name, defaultBuyIn: s.defaultBuyIn, expenseCents: s.expenseCents,
+    id: s.id, name: s.name, defaultBuyIn: s.defaultBuyIn, chipsPerBuyIn: s.chipsPerBuyIn, expenseCents: s.expenseCents,
     isEnded: false, isDemo: false, players: s.players, paid: {}, bills: s.bills ?? [], round: s.round === true
   });
   state.tab = 'table';

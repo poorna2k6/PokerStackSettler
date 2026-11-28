@@ -9,15 +9,15 @@ import { renderQr } from './qr';
 import { drawSettlement, sharePicture } from './picture';
 import { ackClaims, setShareTtl, shareUrl, startSharing, stopSharing, sync } from './sync';
 import {
-  buildReceipt, formatBuyInCount, formatUnit, parseBackup, MAX_UNIT, MIN_UNIT, type Audit, formatCurrency, leaderboard, toCents, unitCentsFor,
+  buildReceipt, chipRateCents, formatBuyInCount, formatUnit, parseBackup, parseBuyInUnit, MAX_UNIT, MIN_UNIT, type Audit, formatCurrency, leaderboard, toCents, unitCentsFor,
   type SavedSession
 } from './engine';
 import { PRESETS } from './presets';
 import { THEMES, type Theme } from './storage';
 import {
-  addPlayer, applyReconcile, audit, clearHistory, deleteSaved, endSession, importBackup, loadSaved,
+  addPlayer, applyReconcile, audit, chipInfo, chipRate, clearHistory, deleteSaved, endSession, importBackup, loadSaved,
   newSession, paidKey, rebuy, removePlayer, reopenSession, saveToHistory, sessionText, setExpense,
-  setFinalTtl, setName, setNote, setPrefs, setRound, setTab, setTheme, setUnit, state, subscribe, togglePaid, updatePlayer, type Tab
+  setFinalTtl, setName, setNote, setPrefs, setRound, setTab, setTheme, setUnit, setupChips, state, subscribe, togglePaid, updatePlayer, type Tab
 } from './state';
 
 const THEME_COLORS: Record<Theme, string> = { midnight: '#000000', felt: '#0a3d2a', ocean: '#06182c', light: '#f2f2f7' };
@@ -26,6 +26,10 @@ let animateSettle = false;
 const money = (c: number) => (c / 100).toFixed(2);
 const unitError = () => toast(`Buy-in unit must be between ${formatUnit(MIN_UNIT)} and ${formatUnit(MAX_UNIT)}`, 'error');
 const changeUnit = (v: string) => { if (!setUnit(v)) unitError(); };
+const parseChips = (v: string) => Math.max(0, Math.round(Number(v.replace(/[,\s]/g, ''))) || 0);
+const chipsWord = (n: number) => `${n.toLocaleString('en-US')} chip${n === 1 ? '' : 's'}`;
+/** A new real game must say what the chips are worth before anyone is added. */
+const needsChipSetup = () => { const s = state.session; return !s.isDemo && s.chipsPerBuyIn === undefined && s.players.length === 0 && !s.isEnded; };
 
 // ---------------------------------------------------------------- helpers
 
@@ -98,6 +102,7 @@ function tableView(): HTMLElement {
   const a = audit();
   const locked = s.isEnded;
   const view = h('div', { class: 'view' });
+  const ci = chipInfo();
 
   if (!state.storageOk) {
     view.append(h('div', { class: 'demo-card warn-top', attrs: { role: 'alert' } },
@@ -116,9 +121,16 @@ function tableView(): HTMLElement {
   view.append(
     h('div', { class: 'kpis' },
       kpi('Players', String(a.players.length)),
-      kpi('Pot', formatCurrency(a.totalBuyInCents), `${a.totalBuyInCount} buy-in${a.totalBuyInCount === 1 ? '' : 's'}`),
-      kpi('Chips out', formatCurrency(a.totalAccountedCents), a.isBalanced ? 'Balanced ✓' : formatCurrency(a.discrepancyCents, true), a.isBalanced ? 'good' : 'warn'))
+      kpi('Pot', formatCurrency(a.totalBuyInCents), ci ? `${chipsWord(ci.issued)} given out` : `${a.totalBuyInCount} buy-in${a.totalBuyInCount === 1 ? '' : 's'}`),
+      ci
+        ? kpi('Chips back', chipsWord(ci.returned + ci.rakeChips), ci.diff === 0 ? 'Balanced ✓' : `${ci.diff > 0 ? '+' : '−'}${Math.abs(ci.diff).toLocaleString('en-US')} chips`, ci.diff === 0 ? 'good' : 'warn')
+        : kpi('Chips out', formatCurrency(a.totalAccountedCents), a.isBalanced ? 'Balanced ✓' : formatCurrency(a.discrepancyCents, true), a.isBalanced ? 'good' : 'warn'))
   );
+  if (needsChipSetup()) {
+    view.append(group(h('div', { class: 'row banner' },
+      h('span', { class: 'grow' }, h('strong', { text: 'Set up the chips first' }), h('div', { class: 'muted small', text: 'How many chips is a buy-in, and what is it worth in real money?' })),
+      h('button', { class: 'btn primary slim', text: 'Set up', on: { click: () => openChipSetup() } }))));
+  }
 
   if (locked) {
     view.append(group(h('div', { class: 'row banner info' },
@@ -132,8 +144,8 @@ function tableView(): HTMLElement {
     view.append(
       h('div', { class: 'group warn-card' },
         h('div', { class: 'row banner' },
-          h('strong', { text: `${formatCurrency(Math.abs(a.discrepancyCents))} ${over ? 'too many' : 'missing'}` }),
-          h('span', { class: 'muted', text: 'Ending chips ≠ buy-ins' })),
+          h('strong', { text: ci ? `${chipsWord(Math.abs(ci.diff))} ${ci.diff > 0 ? 'too many' : 'missing'} (${formatCurrency(Math.abs(a.discrepancyCents))})` : `${formatCurrency(Math.abs(a.discrepancyCents))} ${over ? 'too many' : 'missing'}` }),
+          h('span', { class: 'muted', text: ci ? 'Chips handed back ≠ chips given out' : 'Ending chips ≠ buy-ins' })),
         h('div', { class: 'seg-row' },
           h('button', { class: 'chip', text: 'Pro-rata', on: { click: () => requestReconcile('proRataWinners', 'Pro-rata') } }),
           h('button', { class: 'chip', text: 'Equal split', on: { click: () => requestReconcile('equalSplit', 'Equal split') } }),
@@ -167,7 +179,10 @@ function tableView(): HTMLElement {
   view.append(header('Session'));
   view.append(group(
     field('Name', textInput(s.name, setName, { disabled: locked, label: 'Session name' })),
-    field('Buy-in unit ($)', textInput(String(s.defaultBuyIn), changeUnit, { disabled: locked, mode: 'decimal', label: 'Buy-in unit' })),
+    ...(ci
+      ? [h('button', { class: 'row action', attrs: { 'aria-label': `Chips: ${s.chipsPerBuyIn} chips per ${formatCurrency(toCents(s.defaultBuyIn))} buy-in`, disabled: locked || a.totalBuyInCents > 0 }, on: { click: () => openChipSetup() } },
+          h('span', { class: 'grow' }, h('strong', { text: `${s.chipsPerBuyIn} chips = ${formatCurrency(toCents(s.defaultBuyIn))}` }), h('div', { class: 'muted small', text: `1 chip = ${formatCurrency(ci.rateCents)}${a.totalBuyInCents > 0 ? ' · fixed once play has started' : ' · tap to change'}` })))]
+      : [field('Buy-in unit ($)', textInput(String(s.defaultBuyIn), changeUnit, { disabled: locked, mode: 'decimal', label: 'Buy-in unit' }))]),
     field('Rake / house cut ($)', textInput(money(s.expenseCents), setExpense, { disabled: locked, mode: 'decimal', label: 'Rake or house cut' })),
     h('button', { class: 'row action', attrs: { 'aria-label': `Extra expenses, ${a.billsTotalCents ? formatCurrency(a.billsTotalCents) : 'none'}` }, on: { click: () => openExpenses() } },
       h('span', { class: 'grow', text: 'Extra expenses (food, drinks…)' }),
@@ -345,7 +360,7 @@ function requestReconcile(mode: 'proRataWinners' | 'equalSplit' | 'topWinner', l
   if (a.isBalanced) return;
   confirmSheet({
     title: `Apply “${label}”?`,
-    message: `Ending chips are ${formatCurrency(Math.abs(a.discrepancyCents))} ${a.discrepancyCents < 0 ? 'short' : 'over'}. “${label}” changes the ending chips so the table balances.\n\nThis can’t be undone automatically.`,
+    message: `${chipInfo() ? `Chips handed back are ${chipsWord(Math.abs(chipInfo()!.diff))} ${chipInfo()!.diff < 0 ? 'short' : 'over'} (${formatCurrency(Math.abs(a.discrepancyCents))})` : `Ending chips are ${formatCurrency(Math.abs(a.discrepancyCents))} ${a.discrepancyCents < 0 ? 'short' : 'over'}`}. “${label}” changes the ending chips so the table balances.\n\nThis can’t be undone automatically.`,
     confirmLabel: 'Apply', destructive: true,
     onConfirm: () => applyReconcile(mode)
   });
@@ -402,7 +417,11 @@ function openRenameSheet(id: string) {
 }
 
 function playerRow(i: number, id: string, name: string, buyIn: number, cashOut: number, count: number, net: number, locked: boolean) {
-  const cash = textInput(money(cashOut), v => updatePlayer(id, { cashOutCents: Math.max(0, toCents(v)) }), { disabled: locked, mode: 'decimal', label: `${name} ending chips`, fk: `cash:${id}` });
+  const rate = chipRate();
+  const chipsBack = rate ? Math.round(cashOut / rate) : 0;
+  const cash = rate
+    ? textInput(String(chipsBack), v => updatePlayer(id, { cashOutChips: parseChips(v) }), { disabled: locked, mode: 'numeric', label: `${name} chips handed back`, fk: `cash:${id}` })
+    : textInput(money(cashOut), v => updatePlayer(id, { cashOutCents: Math.max(0, toCents(v)) }), { disabled: locked, mode: 'decimal', label: `${name} ending chips`, fk: `cash:${id}` });
   cash.classList.add('mono');
   const tone = net > 0 ? 'good' : net < 0 ? 'bad' : 'muted';
   return h('div', { class: 'row player' },
@@ -416,7 +435,8 @@ function playerRow(i: number, id: string, name: string, buyIn: number, cashOut: 
       locked ? null : h('button', { class: 'icon-btn', text: '✕', attrs: { 'aria-label': `Remove ${name}` }, on: { click: () => confirmRemove(id, name) } })),
     h('div', { class: 'player-bottom' },
       stepper(id, buyIn, count, locked),
-      h('label', { class: 'cash' }, h('span', { class: 'muted', text: '$', attrs: { 'aria-hidden': 'true' } }), cash)));
+      h('label', { class: 'cash' }, h('span', { class: 'muted', text: rate ? '🪙' : '$', attrs: { 'aria-hidden': 'true' } }), cash)),
+    ...(rate ? [h('div', { class: 'chip-line muted small mono', text: `${chipsWord(Math.round(buyIn / rate))} given · ${chipsWord(chipsBack)} back = ${formatCurrency(cashOut)}` })] : []));
 }
 
 /** Edit sheet used from the oval-table view. Redraws itself after every change. */
@@ -427,13 +447,17 @@ function openPlayerSheet(id: string) {
       const p = audit().players.find(x => x.id === id);
       if (!p) { close(); return; }
       const locked = state.session.isEnded;
-      const cash = textInput(money(p.cashOutCents), v => { updatePlayer(id, { cashOutCents: Math.max(0, toCents(v)) }); draw(); }, { disabled: locked, mode: 'decimal', label: 'Ending chips' });
+      const rate = chipRate();
+      const cash = rate
+        ? textInput(String(Math.round(p.cashOutCents / rate)), v => { updatePlayer(id, { cashOutChips: parseChips(v) }); draw(); }, { disabled: locked, mode: 'numeric', label: 'Chips handed back' })
+        : textInput(money(p.cashOutCents), v => { updatePlayer(id, { cashOutCents: Math.max(0, toCents(v)) }); draw(); }, { disabled: locked, mode: 'decimal', label: 'Ending chips' });
       cash.classList.add('mono');
       body.replaceChildren(
         group(
           h('div', { class: 'row' }, h('span', { class: 'muted', text: 'Name' }), h('strong', { class: 'grow right', text: p.name }),
             locked ? null : h('button', { class: 'link', text: 'Rename', attrs: { 'aria-label': `Rename ${p.name}` }, on: { click: () => { close(); requestRename(id); } } })),
-          field('Ending chips ($)', cash)),
+          field(rate ? 'Chips handed back' : 'Ending chips ($)', cash),
+          ...(rate ? [h('div', { class: 'row' }, h('span', { class: 'muted', text: 'Worth' }), h('strong', { class: 'mono grow right', text: `${chipsWord(Math.round(p.buyInCents / rate))} given · ${formatCurrency(p.cashOutCents)} back` }))] : [])),
         h('div', { class: 'sheet-stepper' }, chipStack(p.buyInCount, 8), stepper(id, p.buyInCents, p.buyInCount, locked, draw)),
         h('div', { class: 'row banner' }, h('span', { class: 'muted', text: 'Net result' }),
           h('strong', { class: `mono ${p.netCents > 0 ? 'good' : p.netCents < 0 ? 'bad' : 'muted'}`, text: formatCurrency(p.netCents, true) })),
@@ -445,13 +469,59 @@ function openPlayerSheet(id: string) {
   });
 }
 
+/** The chip setup every real game starts with: chips per buy-in, and what a buy-in is worth in real money. */
+function openChipSetup(after?: () => void) {
+  openSheet('Set up the chips', close => {
+    const s = state.session;
+    const chips = h('input', { attrs: { type: 'text', inputmode: 'numeric', placeholder: 'e.g. 40', autocomplete: 'off', 'aria-label': 'Chips per buy-in' } });
+    const real = h('input', { attrs: { type: 'text', inputmode: 'decimal', placeholder: 'e.g. 10', autocomplete: 'off', 'aria-label': 'Real money per buy-in in dollars' } });
+    chips.value = s.chipsPerBuyIn ? String(s.chipsPerBuyIn) : '';
+    real.value = String(s.defaultBuyIn);
+    const preview = h('p', { class: 'chip-preview', attrs: { role: 'status', 'aria-live': 'polite' } });
+    const error = h('p', { class: 'bad small', attrs: { role: 'alert' } });
+    const read = () => ({ n: parseInt(chips.value.replace(/[,\s]/g, ''), 10), m: parseBuyInUnit(real.value.replace(/[$,\s]/g, '')) });
+    const update = () => {
+      error.textContent = '';
+      const { n, m } = read();
+      const rate = m !== null && Number.isInteger(n) ? chipRateCents(m, n) : null;
+      preview.textContent = rate !== null && m !== null
+        ? `Each player gets ${chipsWord(n)} for ${formatCurrency(toCents(m))}. 1 chip = ${formatCurrency(rate)}. Handing back ${chipsWord(n * 3)} means ${formatCurrency(rate * n * 3)}.`
+        : 'Fill in both numbers to see what one chip is worth.';
+    };
+    chips.addEventListener('input', update);
+    real.addEventListener('input', update);
+    const save = () => {
+      const { n, m } = read();
+      const err = setupChips(n, m ?? NaN);
+      if (err) { error.textContent = err; return; }
+      haptic();
+      close();
+      after?.();
+    };
+    for (const el of [chips, real]) el.addEventListener('keydown', e => { if (e.key === 'Enter') save(); });
+    update();
+    requestAnimationFrame(() => chips.focus());
+    return h('div', { class: 'sheet-body' },
+      h('p', { class: 'muted', text: 'Players buy chips, play, then hand chips back. The final settlement is what each player handed back, in real money.' }),
+      group(
+        h('label', { class: 'row field' }, h('span', { text: 'Chips per buy-in' }), chips),
+        h('label', { class: 'row field' }, h('span', { text: 'Real money per buy-in ($)' }), real)),
+      h('div', { class: 'seg-row wrap', attrs: { 'aria-label': 'Common chip counts' } },
+        ...[20, 25, 40, 50, 100].map(n => h('button', { class: 'chip', text: `${n} chips`, on: { click: () => { chips.value = String(n); update(); } } }))),
+      preview, error,
+      h('button', { class: 'btn primary block', text: s.chipsPerBuyIn ? 'Save' : 'Start the game', on: { click: save } }),
+      h('p', { class: 'muted small', text: 'A chip must be worth a whole number of cents (for example 40 chips for $10 = 25¢ each), so every payout is exact.' }));
+  });
+}
+
 function openAddPlayer() {
+  if (needsChipSetup()) { openChipSetup(() => openAddPlayer()); return; }
   openSheet('Add player', close => {
     const name = h('input', { attrs: { type: 'text', placeholder: 'Name', autocapitalize: 'words', autocomplete: 'off', 'aria-label': 'New player name', enterkeyhint: 'done' } });
     const count = h('input', { attrs: { type: 'text', inputmode: 'decimal', value: '1', 'aria-label': 'Number of buy-ins' } });
     const countLabel = h('span', { text: `Buy-ins (× ${formatUnit(state.session.defaultBuyIn)})` });
     // On an empty table the unit can be chosen up front, before any buy-in is entered.
-    const unit = state.session.players.length === 0 && !state.session.isEnded
+    const unit = state.session.players.length === 0 && !state.session.isEnded && !state.session.chipsPerBuyIn
       ? textInput(String(state.session.defaultBuyIn), v => { changeUnit(v); countLabel.textContent = `Buy-ins (× ${formatUnit(state.session.defaultBuyIn)})`; }, { mode: 'decimal', label: 'Buy-in unit for this session' })
       : null;
     const submit = (keepOpen: boolean) => {
@@ -491,8 +561,8 @@ function confirmEnd() {
   if (a.players.length < 2) return;
   if (!a.isBalanced) {
     confirmSheet({
-      title: `Chips are ${formatCurrency(Math.abs(a.discrepancyCents))} ${a.discrepancyCents < 0 ? 'short' : 'over'}`,
-      message: `${previewLines()}${a.totalPlayerCashOutCents === 0 ? 'No ending chips have been entered yet.\n\n' : ''}Ending chips (${formatCurrency(a.totalAccountedCents)}) don't match buy-ins (${formatCurrency(a.totalBuyInCents)}).\n\nContinuing will adjust payouts so the table balances (pro-rata among winners, or equally if nobody is ahead), then lock the session.`,
+      title: chipInfo() ? `${chipsWord(Math.abs(chipInfo()!.diff))} ${chipInfo()!.diff < 0 ? 'missing' : 'too many'}` : `Chips are ${formatCurrency(Math.abs(a.discrepancyCents))} ${a.discrepancyCents < 0 ? 'short' : 'over'}`,
+      message: `${previewLines()}${a.totalPlayerCashOutCents === 0 ? 'No ending chips have been entered yet.\n\n' : ''}${chipInfo() ? `Chips handed back (${chipsWord(chipInfo()!.returned + chipInfo()!.rakeChips)}) don't match chips given out (${chipsWord(chipInfo()!.issued)}).` : `Ending chips (${formatCurrency(a.totalAccountedCents)}) don't match buy-ins (${formatCurrency(a.totalBuyInCents)}).`}\n\nContinuing will adjust payouts so the table balances (pro-rata among winners, or equally if nobody is ahead), then lock the session.`,
       confirmLabel: 'Balance & settle', onConfirm: finishSession
     });
     return;
@@ -518,7 +588,7 @@ function settleView(): HTMLElement {
 
   if (!a.isBalanced) {
     view.append(group(h('div', { class: 'row banner' },
-      h('strong', { text: `⚠️ Off by ${formatCurrency(a.discrepancyCents, true)}` }),
+      h('strong', { text: chipInfo() ? `⚠️ ${chipsWord(Math.abs(chipInfo()!.diff))} ${chipInfo()!.diff < 0 ? 'missing' : 'too many'}` : `⚠️ Off by ${formatCurrency(a.discrepancyCents, true)}` }),
       h('button', { class: 'link', text: 'Fix on Table', on: { click: () => setTab('table') } }))));
   }
 
@@ -560,6 +630,20 @@ function settleView(): HTMLElement {
     })));
   }
 
+  const csum = chipInfo();
+  if (csum) {
+    view.append(header('What everyone handed back', `1 chip = ${formatCurrency(csum.rateCents)}`));
+    view.append(group(...csum.lines.map(l => h('div', { class: 'row chiprow' },
+      h('span', { class: 'grow' },
+        h('strong', { text: l.name }),
+        h('div', { class: 'muted small mono', text: `had ${chipsWord(l.issued)} (${formatCurrency(l.buyInCents)})` })),
+      h('span', { class: 'amt-col' },
+        h('span', { class: 'mono', text: `${chipsWord(l.returned)} back` }),
+        h('span', { class: `mono small ${l.netCents > 0 ? 'good' : l.netCents < 0 ? 'bad' : 'muted'}`, text: `= ${formatCurrency(l.valueCents)} → ${formatCurrency(l.netCents, true)}` })))),
+      h('div', { class: 'row' }, h('span', { class: 'muted grow', text: 'Total' }),
+        h('strong', { class: `mono ${csum.diff === 0 ? 'good' : 'bad'}`, text: `${chipsWord(csum.returned + csum.rakeChips)} back of ${chipsWord(csum.issued)}${csum.diff === 0 ? ' ✓' : ` (${csum.diff > 0 ? '+' : '−'}${Math.abs(csum.diff)})`}` }))));
+  }
+
   view.append(header('Standings', a.billsTotalCents ? 'poker → after food' : ''));
   const sorted = [...a.players].sort((x, y) => y.netCents - x.netCents);
   const hasBills = a.billsTotalCents > 0;
@@ -591,7 +675,7 @@ function settleView(): HTMLElement {
     ] : [])));
   if (s.share && !s.isDemo) view.append(h('div', { class: 'foot', text: 'The note shows at the top of the live link. After you settle, the link stays live for the time chosen above, then it is deleted.' }));
 
-  const receipt = () => buildReceipt(s.name, a, s.paid);
+  const receipt = () => buildReceipt(s.name, a, s.paid, chipInfo());
   if (a.players.length === 0) return view;
   view.append(
     h('button', { class: 'btn primary block', text: 'Share / copy receipt', on: { click: async () => {

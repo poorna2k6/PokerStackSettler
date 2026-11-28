@@ -317,3 +317,6 @@ input::placeholder { color: var(--muted); } input:focus { outline: none; color: 
 .me-line .btn.slim { margin-left: 8px; }
 .me-line { flex-wrap: wrap; row-gap: 6px; }
 .row.claim .grow { flex: 1 1 160px; }
+.chip-preview { margin: 8px 0; font-weight: 600; color: var(--accent); min-height: 2.6em; }
+.chip-line { margin: 2px 0 0; padding: 0 2px; }
+.row.chiprow { gap: 10px; }
