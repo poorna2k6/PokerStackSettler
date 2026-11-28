@@ -2,7 +2,7 @@
 // it pushes snapshots to /api/share using a secret host key that never leaves this device.
 import { closeAllSheets, confirmSheet, toast } from './dom';
 import { normalizeCode, type SharedSnapshot } from './shared';
-import { lockPersistence, notify, onCommit, onShareOrphaned, setShare, shareSnapshot, state } from './state';
+import { audit, lockPersistence, notify, onCommit, onShareOrphaned, paidKey, setShare, shareSnapshot, state } from './state';
 import { loadLive } from './storage';
 
 const API = '/api/share';
@@ -232,6 +232,7 @@ window.setInterval(heartbeat, 45000);
 // "unchanged" unless the table or its requests changed.
 let seenRev = 0;
 let seenCode = '';
+let strayBefore = new Set<string>();
 async function pollClaims() {
   const share = state.session.share;
   if (share && share.code !== seenCode) { seenCode = share.code; seenRev = 0; sync.claims = []; }
@@ -243,7 +244,15 @@ async function pollClaims() {
     const r = await call<{ unchanged?: boolean; rev?: number; claims?: string[] }>('GET', `?code=${share.code}${seenRev ? `&since=${seenRev}` : ''}`);
     if (r.status !== 200 || r.data?.unchanged) return;
     seenRev = r.data?.rev ?? seenRev;
-    const next = Array.isArray(r.data?.claims) ? r.data.claims.slice(0, 40) : [];
+    const all = Array.isArray(r.data?.claims) ? r.data.claims.slice(0, 40) : [];
+    // Only requests that match a payment on the Settle tab count. One that matched nothing for two checks in a row
+    // (stale after an amount changed, or junk) is cleared on the server so it can never fill the host's list.
+    const valid = new Set(audit().transfers.map(t => paidKey(t.id, t.amountCents)));
+    const next = all.filter(k => valid.has(k));
+    const stray = all.filter(k => !valid.has(k));
+    const clear = stray.filter(k => strayBefore.has(k));
+    strayBefore = new Set(stray);
+    if (clear.length) void ackClaims(clear);
     const fresh = next.filter(k => !sync.claims.includes(k));
     if (fresh.length === 0 && next.length === sync.claims.length) return;
     sync.claims = next;

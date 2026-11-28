@@ -75,7 +75,12 @@ export function mountViewer(rawCode: string) {
   async function sendPaid(key: string) {
     if (!code) return;
     try {
-      const res = await fetch(`/api/share?code=${code}&action=paid`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key }) });
+      let res = await fetch(`/api/share?code=${code}&action=paid`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key }) });
+      // the table was busy for a moment (another save at the same time): try again a couple of times
+      for (let i = 0; i < 2 && res.status === 409; i++) {
+        await new Promise(r => setTimeout(r, 400 * (i + 1)));
+        res = await fetch(`/api/share?code=${code}&action=paid`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key }) });
+      }
       if (res.status === 200) { if (!claims.includes(key)) claims = [...claims, key]; toast('Sent — the host will confirm'); render(); return; }
       toast(res.status === 429 ? 'Too many requests — try again later' : 'Could not send that', 'error');
     } catch {

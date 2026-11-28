@@ -170,6 +170,7 @@ var StorageNotConfigured = class extends Error {
 };
 var MAX_CLAIMS = 40;
 var CLAIM_TTL_MS = 24 * 3600 * 1e3;
+var HOUSE_ID_PUBLIC = "__house_expense__";
 var CLAIM_KEY_RE = /^[A-Za-z0-9_-]{1,64}->[^\u0000-\u001f]{1,120}:\d{1,10}$/;
 var ttlOf = (rec) => pickTtl(rec?.ttl);
 var untilOf = (rec, now) => rec.settledAt && rec.finalTtl ? rec.settledAt + rec.finalTtl * 1e3 : now + ttlOf(rec) * 1e3;
@@ -220,7 +221,7 @@ function publicOffer(rec, now) {
   if (!o) return void 0;
   return { kind: o.kind, playerId: o.playerId, expiresAt: o.expiresAt, status: o.claim ? "claimed" : "open" };
 }
-async function mutate(store, code, now, fn) {
+async function mutate(store, code, now, fn, keepLife = false) {
   const key = `share:${code}`;
   for (let attempt = 0; attempt < 5; attempt++) {
     const raw = await store.get(key);
@@ -233,6 +234,7 @@ async function mutate(store, code, now, fn) {
       }
     }
     const step = await fn(rec);
+    const rec0 = rec;
     if (step.remove && raw) {
       if (await store.delIf(key, raw)) {
         await store.set(`tomb:${code}`, "1", SHARE_TTL_SECONDS);
@@ -243,7 +245,10 @@ async function mutate(store, code, now, fn) {
     if (!step.next) return step.res;
     let ttl = ttlOf(step.next);
     step.next.expiresAt = now + ttl * 1e3;
-    if (step.next.settledAt && step.next.finalTtl) {
+    if (keepLife && rec0?.expiresAt && rec0.expiresAt > now) {
+      step.next.expiresAt = rec0.expiresAt;
+      ttl = Math.max(1, Math.ceil((rec0.expiresAt - now) / 1e3));
+    } else if (step.next.settledAt && step.next.finalTtl) {
       step.next.expiresAt = step.next.settledAt + step.next.finalTtl * 1e3;
       ttl = Math.max(1, Math.ceil((step.next.expiresAt - now) / 1e3));
     }
@@ -313,7 +318,7 @@ async function handleShare(req, store, now = Date.now(), limits = LIMITS, secret
         epoch: rec.epoch ?? 1,
         offer: publicOffer(rec, now),
         ttl: ttlOf(rec),
-        claims: Object.keys(rec.claims ?? {}),
+        claims: Object.entries(rec.claims ?? {}).filter(([, t]) => now - t < CLAIM_TTL_MS).map(([k]) => k),
         expiresAt: rec.expiresAt ?? rec.snapshot.updatedAt + ttlOf(rec) * 1e3
       });
     }
@@ -420,12 +425,20 @@ async function handleAction(req, store, code, now, limits, ip) {
     if (await limited(store, `rl:paid:${ip}`, limits.paid)) return err(429, "Too many requests, try again later");
     return mutate(store, code, now, async (rec2) => {
       if (!rec2) return { res: await gone(store, code) };
-      if (rec2.snapshot.paid[key] || rec2.claims?.[key]) return { res: json(200, { ok: true }) };
+      const arrow = key.indexOf("->");
+      const colon = key.lastIndexOf(":");
+      const from = key.slice(0, arrow);
+      const to = key.slice(arrow + 2, colon);
+      const ids = new Set(rec2.snapshot.players.map((p) => p.id));
+      const guests = new Set((rec2.snapshot.bills ?? []).filter((b) => !b.payerId && b.guest).map((b) => `guest:${b.guest.trim().toLowerCase()}`));
+      if (!ids.has(from) || !(ids.has(to) || guests.has(to) || to === HOUSE_ID_PUBLIC)) return { res: err(400, "That payment is not on this table") };
+      if (rec2.snapshot.paid[key] || rec2.claims && Object.hasOwn(rec2.claims, key)) return { res: json(200, { ok: true }) };
       const fresh = Object.fromEntries(Object.entries(rec2.claims ?? {}).filter(([, t]) => now - t < CLAIM_TTL_MS));
-      if (Object.keys(fresh).length >= MAX_CLAIMS) return { res: err(429, "The host has too many requests waiting") };
-      const next = { ...rec2, rev: rec2.rev + 1, claims: { ...fresh, [key]: now } };
+      const entries = Object.entries(fresh).sort((a, b) => a[1] - b[1]);
+      while (entries.length >= MAX_CLAIMS) entries.shift();
+      const next = { ...rec2, rev: rec2.rev + 1, claims: { ...Object.fromEntries(entries), [key]: now } };
       return { next, res: json(200, { ok: true }) };
-    });
+    }, true);
   }
   const hostKey = req.headers["x-host-key"];
   if (action === "ack") {
@@ -434,10 +447,10 @@ async function handleAction(req, store, code, now, limits, ip) {
     return mutate(store, code, now, async (rec2) => {
       if (!rec2) return { res: await gone(store, code) };
       if (!keyMatches(hostKey, rec2.keyHash)) return { res: err(403, "Only the host can change this table") };
-      if (!rec2.claims || !keys.some((k) => k in rec2.claims)) return { res: json(200, { ok: true }) };
+      if (!rec2.claims || !keys.some((k) => Object.hasOwn(rec2.claims, k))) return { res: json(200, { ok: true }) };
       const left = Object.fromEntries(Object.entries(rec2.claims).filter(([k]) => !keys.includes(k)));
       return { next: { ...rec2, rev: rec2.rev + 1, claims: Object.keys(left).length ? left : void 0 }, res: json(200, { ok: true }) };
-    });
+    }, true);
   }
   if (action === "verify") {
     if (method !== "POST") return err(405, "Method not allowed");
