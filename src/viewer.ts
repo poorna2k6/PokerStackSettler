@@ -36,6 +36,7 @@ export function mountViewer(rawCode: string) {
   let view: 'table' | 'list' = 'table';
   let statusEl: HTMLElement | null = null;
   let freshEl: HTMLElement | null = null;
+  let claims: string[] = []; // "I paid" requests waiting for the host (from the server)
   let validUntil: number | undefined;
   let lastChangeAt = Date.now(); // when this page last saw the table change (drives the slower polling)
 
@@ -67,6 +68,23 @@ export function mountViewer(rawCode: string) {
       toast(res.status === 409 ? 'Someone else already accepted — wait for the host' : 'That offer is no longer open', 'error');
     } catch (e) {
       toast((e as Error).message || 'Could not reach the server', 'error');
+    }
+  }
+
+  /** "I paid": only asks the host to confirm. Nothing changes for anyone until the host approves. */
+  async function sendPaid(key: string) {
+    if (!code) return;
+    try {
+      let res = await fetch(`/api/share?code=${code}&action=paid`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key }) });
+      // the table was busy for a moment (another save at the same time): try again a couple of times
+      for (let i = 0; i < 2 && res.status === 409; i++) {
+        await new Promise(r => setTimeout(r, 400 * (i + 1)));
+        res = await fetch(`/api/share?code=${code}&action=paid`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key }) });
+      }
+      if (res.status === 200) { if (!claims.includes(key)) claims = [...claims, key]; toast('Sent — the host will confirm'); render(); return; }
+      toast(res.status === 429 ? 'Too many requests — try again later' : 'Could not send that', 'error');
+    } catch {
+      toast('Could not reach the server — try again', 'error');
     }
   }
 
@@ -238,7 +256,10 @@ export function mountViewer(rawCode: string) {
       for (const t of a.transfers) {
         const paid = Boolean(snap!.paid[paidKey(t.id, t.amountCents)]);
         if (t.fromId === me.id) lines.push(h('div', { class: 'me-line' }, h('span', { class: 'bad', text: `You pay ${t.toName}` }), h('strong', { class: 'mono', text: `${formatCurrency(t.amountCents)}${paid ? ' ✓' : ''}` }),
-          h('button', { class: 'link', text: 'Copy', attrs: { 'aria-label': `Copy ${(t.amountCents / 100).toFixed(2)}` }, on: { click: async () => { try { await navigator.clipboard.writeText((t.amountCents / 100).toFixed(2)); toast('Amount copied'); } catch { toast('Could not copy', 'error'); } } } })));
+          h('button', { class: 'link', text: 'Copy', attrs: { 'aria-label': `Copy ${(t.amountCents / 100).toFixed(2)}` }, on: { click: async () => { try { await navigator.clipboard.writeText((t.amountCents / 100).toFixed(2)); toast('Amount copied'); } catch { toast('Could not copy', 'error'); } } } }),
+          ...(paid ? [] : claims.includes(paidKey(t.id, t.amountCents))
+            ? [h('span', { class: 'muted small', text: '⏳ waiting for the host', attrs: { role: 'status' } })]
+            : [h('button', { class: 'btn tinted slim', text: 'I paid', attrs: { 'aria-label': `I paid ${t.toName} ${formatCurrency(t.amountCents)}` }, on: { click: () => { void sendPaid(paidKey(t.id, t.amountCents)); } } })])));
         else if (t.toId === me.id) lines.push(h('div', { class: 'me-line' }, h('span', { class: 'good', text: `${t.fromName} pays you` }), h('strong', { class: 'mono', text: `${formatCurrency(t.amountCents)}${paid ? ' ✓' : ''}` })));
       }
       if (lines.length === 0) lines.push(h('div', { class: 'me-line muted', text: 'You don’t owe or receive anything.' }));
@@ -349,12 +370,13 @@ export function mountViewer(rawCode: string) {
       if (res.status === 503) { phase = 'unavailable'; render(); timer = window.setTimeout(poll, 30000); return; }
       if (res.status === 429) { throw new Error('rate'); }
       if (!res.ok) throw new Error(String(res.status));
-      const data = (await res.json()) as { unchanged?: boolean; rev: number; snapshot?: SharedSnapshot; offer?: PublicOffer; expiresAt?: number };
+      const data = (await res.json()) as { unchanged?: boolean; rev: number; snapshot?: SharedSnapshot; offer?: PublicOffer; expiresAt?: number; claims?: string[] };
       failures = 0;
       miss404 = 0;
       goneRetries = 0;
       const changed = (!data.unchanged && !!data.snapshot) || phase !== 'ok';
       if (data.expiresAt) validUntil = data.expiresAt;
+      if (!data.unchanged) claims = Array.isArray(data.claims) ? data.claims : [];
       if (!data.unchanged && data.snapshot) {
         const before = snap;
         snap = data.snapshot; rev = data.rev; offer = data.offer;

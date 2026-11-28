@@ -7,7 +7,7 @@ import { askExtraExpenses, openExpenses, previewLines } from './expenses';
 import { openHandoverSheet } from './handover';
 import { renderQr } from './qr';
 import { drawSettlement, sharePicture } from './picture';
-import { setShareTtl, shareUrl, startSharing, stopSharing, sync } from './sync';
+import { ackClaims, setShareTtl, shareUrl, startSharing, stopSharing, sync } from './sync';
 import {
   buildReceipt, formatBuyInCount, formatUnit, parseBackup, MAX_UNIT, MIN_UNIT, type Audit, formatCurrency, leaderboard, toCents, unitCentsFor,
   type SavedSession
@@ -520,6 +520,20 @@ function settleView(): HTMLElement {
     view.append(group(h('div', { class: 'row banner' },
       h('strong', { text: `⚠️ Off by ${formatCurrency(a.discrepancyCents, true)}` }),
       h('button', { class: 'link', text: 'Fix on Table', on: { click: () => setTab('table') } }))));
+  }
+
+  const waiting = a.transfers.filter(t => sync.claims.includes(paidKey(t.id, t.amountCents)) && !s.paid[paidKey(t.id, t.amountCents)]);
+  if (waiting.length) {
+    view.append(header('Waiting for your OK', String(waiting.length)));
+    view.append(group(...waiting.map(t => {
+      const key = paidKey(t.id, t.amountCents);
+      return h('div', { class: 'row claim' },
+        h('span', { class: 'grow' },
+          h('strong', { text: `${t.fromName} says they paid ${t.toName}` }),
+          h('div', { class: 'muted small mono', text: formatCurrency(t.amountCents) })),
+        h('button', { class: 'btn primary slim', text: 'Approve', attrs: { 'aria-label': `Approve: ${t.fromName} paid ${t.toName} ${formatCurrency(t.amountCents)}` }, on: { click: () => { haptic(); if (!state.session.paid[key]) togglePaid(key); void ackClaims([key]); } } }),
+        h('button', { class: 'btn plain slim', text: 'Not yet', attrs: { 'aria-label': `Not yet: ${t.fromName} to ${t.toName}` }, on: { click: () => { void ackClaims([key]); } } }));
+    })));
   }
 
   view.append(header('Who pays whom', a.transfers.length ? `tap to mark paid${s.round ? ' · whole dollars' : ''}` : ''));

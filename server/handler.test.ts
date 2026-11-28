@@ -248,6 +248,59 @@ describe('expiry and abuse limits', () => {
     expect(r.status).toBe(404);
   });
 
+  it('"I paid" requests: viewers can only ask, the host decides, and abuse is capped', async () => {
+    const { call } = setup();
+    const { data } = await create(call);
+    const KEY = 'a->b:509';
+    const paid = (key: unknown) => call(req('POST', { query: { code: data.code, action: 'paid' }, body: { key } }));
+    expect((await paid(KEY)).status).toBe(200);
+    const got = (await call(req('GET', { query: { code: data.code } }))).body as { claims: string[]; snapshot: { paid: Record<string, boolean> }; rev: number };
+    expect(got.claims).toEqual([KEY]);
+    expect(got.snapshot.paid[KEY]).toBeUndefined(); // nothing is paid by itself
+    // junk is refused
+    for (const bad of ['', 'x', 123, null, 'a->b', 'a->b:abc', 'a b->b:5', 'a->b:5\n', 'x'.repeat(300), 'ghost->b:5', 'a->ghost:5']) expect((await paid(bad)).status).toBe(400);
+    // a viewer cannot clear requests or approve; only the host can ack
+    const ack = (key: string, keys: string[]) => call(req('POST', { query: { code: data.code, action: 'ack' }, headers: { 'x-host-key': key }, body: { keys } }));
+    expect((await ack('wrong-key-0123456789', [KEY])).status).toBe(403);
+    expect((await ack(data.hostKey, [KEY])).status).toBe(200);
+    expect(((await call(req('GET', { query: { code: data.code } }))).body as { claims: string[] }).claims).toEqual([]);
+    // approving (host saves it as paid) also clears a pending request
+    await paid(KEY);
+    await call(req('PUT', { query: { code: data.code }, headers: { 'x-host-key': data.hostKey }, body: { snapshot: snap({ paid: { [KEY]: true } }) } }));
+    expect(((await call(req('GET', { query: { code: data.code } }))).body as { claims: string[] }).claims).toEqual([]);
+    expect((await paid(KEY)).status).toBe(200); // already paid: harmless
+    // the list is capped per table, and the OLDEST request makes room so a flood can never lock genuine ones out
+    for (let i = 0; i < 45; i++) expect((await paid(`a->b:${1000 + i}`)).status).toBe(200);
+    expect((await paid('b->a:77')).status).toBe(200);
+    const list = ((await call(req('GET', { query: { code: data.code } }))).body as { claims: string[] }).claims;
+    expect(list.length).toBe(40);
+    expect(list).toContain('b->a:77');
+    expect(list).not.toContain('a->b:1000');
+  });
+
+  it('old requests are dropped and a missing table answers 404', async () => {
+    const { call, clock } = setup();
+    const { data } = await create(call);
+    await call(req('POST', { query: { code: data.code, action: 'paid' }, body: { key: 'a->b:100' } }));
+    clock.advance(25 * 3600 * 1000);
+    await call(req('PUT', { query: { code: data.code }, headers: { 'x-host-key': data.hostKey }, body: { snapshot: snap() } }));
+    expect(((await call(req('GET', { query: { code: data.code } }))).body as { claims: string[] }).claims).toEqual([]);
+    expect((await call(req('POST', { query: { code: 'ABCDEFGH', action: 'paid' }, body: { key: 'a->b:100' } }))).status).toBe(404);
+  });
+
+  it('a viewer request never renews the link lifetime', async () => {
+    const { call, clock } = setup();
+    const made = (await call(req('POST', { body: { snapshot: snap(), ttlSeconds: 24 * 3600 } }))).body as { code: string; hostKey: string };
+    const h = 3600 * 1000;
+    clock.advance(12 * h);
+    await call(req('POST', { query: { code: made.code, action: 'paid' }, body: { key: 'a->b:100' } }));
+    clock.advance(10 * h);
+    await call(req('POST', { query: { code: made.code, action: 'paid' }, body: { key: 'b->a:200' } }));
+    await call(req('POST', { query: { code: made.code, action: 'ack' }, headers: { 'x-host-key': made.hostKey }, body: { keys: ['a->b:100'] } }));
+    clock.advance(3 * h); // 25 h after the host's last save
+    expect((await call(req('GET', { query: { code: made.code } }))).status).toBe(404);
+  });
+
   it('throttles code guessing per IP', async () => {
     const { call } = setup();
     let last = 0;
