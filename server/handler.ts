@@ -57,8 +57,15 @@ interface Record_ {
   /** set when the host settles: the link then lives for finalTtl seconds from this moment and is no longer renewed */
   settledAt?: number;
   finalTtl?: number;
+  /** "I paid" requests from viewers waiting for the host's OK: transfer key -> when it was sent */
+  claims?: Record<string, number>;
   offer?: Offer;
 }
+
+export const MAX_CLAIMS = 40;
+const CLAIM_TTL_MS = 24 * 3600 * 1000;
+// `${fromPlayerId}->${toId}:${cents}`; the payer is always a player id, the receiver may be a guest or the house
+const CLAIM_KEY_RE = /^[A-Za-z0-9_-]{1,64}->[^\u0000-\u001f]{1,120}:\d{1,10}$/;
 
 const ttlOf = (rec: { ttl?: number } | null | undefined) => pickTtl(rec?.ttl);
 const untilOf = (rec: Record_, now: number) => (rec.settledAt && rec.finalTtl ? rec.settledAt + rec.finalTtl * 1000 : now + ttlOf(rec) * 1000);
@@ -69,6 +76,7 @@ export const LIMITS = {
   write: { max: 1500, window: 3600 },      // host pushes per code per hour
   read: { max: 20000, window: 3600 },      // polls per IP per hour (a household shares one IP)
   miss: { max: 200, window: 3600 },         // unknown-code lookups per IP per hour: stops code guessing
+  paid: { max: 60, window: 3600 },         // "I paid" requests per IP per hour
   claim: { max: 40, window: 3600 }         // per IP per hour: seat requests and FAILED token attempts (a valid token is never throttled)
 };
 
@@ -225,7 +233,7 @@ export async function handleShare(req: ApiRequest, store: Store, now = Date.now(
       // The host key hash never leaves the server.
       return json(200, {
         snapshot: rec.snapshot, rev: rec.rev, epoch: rec.epoch ?? 1, offer: publicOffer(rec, now),
-        ttl: ttlOf(rec), expiresAt: rec.expiresAt ?? rec.snapshot.updatedAt + ttlOf(rec) * 1000
+        ttl: ttlOf(rec), claims: Object.keys(rec.claims ?? {}), expiresAt: rec.expiresAt ?? rec.snapshot.updatedAt + ttlOf(rec) * 1000
       });
     }
 
@@ -264,6 +272,11 @@ export async function handleShare(req: ApiRequest, store: Store, now = Date.now(
             return { next: kept, res: json(200, { rev: kept.rev, epoch: kept.epoch ?? 1, ttl: ttlOf(kept), expiresAt: untilOf(kept, now) }) };
           }
           const next: Record_ = { ...rec, snapshot, rev: rec.rev + 1 };
+          // a request the host already approved (it is in `paid`) or that is a day old is dropped
+          if (rec.claims) {
+            const kept = Object.fromEntries(Object.entries(rec.claims).filter(([k, t]) => !snapshot.paid[k] && now - t < CLAIM_TTL_MS));
+            next.claims = Object.keys(kept).length ? kept : undefined;
+          }
           const askedFinal = (req.body as { finalTtlSeconds?: unknown } | null)?.finalTtlSeconds;
           if (snapshot.isEnded) {
             next.settledAt = rec.settledAt ?? now; // the clock starts the first time it is settled
@@ -341,8 +354,37 @@ async function handleAction(
     });
   }
 
+  if (action === 'paid') {
+    // A viewer says "I paid". It only records a request for the host to approve: nothing becomes paid by itself.
+    if (method !== 'POST') return err(405, 'Method not allowed');
+    const key = typeof body.key === 'string' ? body.key : '';
+    if (key.length > 260 || !CLAIM_KEY_RE.test(key)) return err(400, 'Invalid payment');
+    if (await limited(store, `rl:paid:${ip}`, limits.paid)) return err(429, 'Too many requests, try again later');
+    return mutate(store, code, now, async rec => {
+      if (!rec) return { res: await gone(store, code) };
+      if (rec.snapshot.paid[key] || rec.claims?.[key]) return { res: json(200, { ok: true }) };
+      const fresh = Object.fromEntries(Object.entries(rec.claims ?? {}).filter(([, t]) => now - t < CLAIM_TTL_MS));
+      if (Object.keys(fresh).length >= MAX_CLAIMS) return { res: err(429, 'The host has too many requests waiting') };
+      const next: Record_ = { ...rec, rev: rec.rev + 1, claims: { ...fresh, [key]: now } };
+      return { next, res: json(200, { ok: true }) };
+    });
+  }
+
   // everything below is host-only
   const hostKey = req.headers['x-host-key'];
+
+  if (action === 'ack') {
+    // the host has dealt with these requests (approved or declined)
+    if (method !== 'POST') return err(405, 'Method not allowed');
+    const keys = Array.isArray(body.keys) ? body.keys.filter((k): k is string => typeof k === 'string').slice(0, MAX_CLAIMS) : [];
+    return mutate(store, code, now, async rec => {
+      if (!rec) return { res: await gone(store, code) };
+      if (!keyMatches(hostKey, rec.keyHash)) return { res: err(403, 'Only the host can change this table') };
+      if (!rec.claims || !keys.some(k => k in rec.claims!)) return { res: json(200, { ok: true }) };
+      const left = Object.fromEntries(Object.entries(rec.claims).filter(([k]) => !keys.includes(k)));
+      return { next: { ...rec, rev: rec.rev + 1, claims: Object.keys(left).length ? left : undefined }, res: json(200, { ok: true }) };
+    });
+  }
 
   if (action === 'verify') {
     if (method !== 'POST') return err(405, 'Method not allowed');

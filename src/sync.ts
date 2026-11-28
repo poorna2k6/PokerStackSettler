@@ -11,7 +11,7 @@ const RETRY_MS = 15000;
 
 export type SyncPhase = 'off' | 'syncing' | 'ok' | 'offline' | 'unavailable' | 'expired';
 /** expiresAt: when the server will drop the link if the host makes no further change (ms since epoch). */
-export const sync: { phase: SyncPhase; at: string; expiresAt?: number; ttl?: number } = { phase: 'off', at: '' };
+export const sync: { phase: SyncPhase; at: string; expiresAt?: number; ttl?: number; /** "I paid" requests from viewers waiting for the host */ claims: string[] } = { phase: 'off', at: '', claims: [] };
 let wantTtl: number | undefined; // a new lifetime the host picked, sent with the next save
 let lastOkAt = 0;
 let missCount = 0;
@@ -227,6 +227,40 @@ async function heartbeat() {
   } catch { /* the next save or beat will retry */ }
 }
 window.setInterval(heartbeat, 45000);
+
+// Every few seconds the host's phone asks whether any viewer pressed "I paid". Cheap: the server answers
+// "unchanged" unless the table or its requests changed.
+let seenRev = 0;
+let seenCode = '';
+async function pollClaims() {
+  const share = state.session.share;
+  if (share && share.code !== seenCode) { seenCode = share.code; seenRev = 0; sync.claims = []; }
+  if (!share || state.session.isDemo || document.visibilityState !== 'visible' || sync.phase === 'unavailable' || sync.phase === 'expired') {
+    if (sync.claims.length && !share) { sync.claims = []; notify(); }
+    return;
+  }
+  try {
+    const r = await call<{ unchanged?: boolean; rev?: number; claims?: string[] }>('GET', `?code=${share.code}${seenRev ? `&since=${seenRev}` : ''}`);
+    if (r.status !== 200 || r.data?.unchanged) return;
+    seenRev = r.data?.rev ?? seenRev;
+    const next = Array.isArray(r.data?.claims) ? r.data.claims.slice(0, 40) : [];
+    const fresh = next.filter(k => !sync.claims.includes(k));
+    if (fresh.length === 0 && next.length === sync.claims.length) return;
+    sync.claims = next;
+    if (fresh.length) toast(`${fresh.length} payment${fresh.length === 1 ? '' : 's'} waiting for your OK — see the Settle tab`);
+    notify();
+  } catch { /* offline: the next poll tries again */ }
+}
+window.setInterval(pollClaims, 6000);
+
+/** The host has dealt with these requests (approved or declined). */
+export async function ackClaims(keys: string[]) {
+  const share = state.session.share;
+  if (!share || keys.length === 0) return;
+  sync.claims = sync.claims.filter(k => !keys.includes(k));
+  notify();
+  try { await call('POST', `?code=${share.code}&action=ack`, { keys }, share.hostKey); } catch { /* shown again at the next poll if it did not go through */ }
+}
 
 function schedule() {
   if (!state.session.share || state.session.isDemo) {

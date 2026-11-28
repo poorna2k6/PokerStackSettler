@@ -168,6 +168,9 @@ var StorageNotConfigured = class extends Error {
     this.name = "StorageNotConfigured";
   }
 };
+var MAX_CLAIMS = 40;
+var CLAIM_TTL_MS = 24 * 3600 * 1e3;
+var CLAIM_KEY_RE = /^[A-Za-z0-9_-]{1,64}->[^\u0000-\u001f]{1,120}:\d{1,10}$/;
 var ttlOf = (rec) => pickTtl(rec?.ttl);
 var untilOf = (rec, now) => rec.settledAt && rec.finalTtl ? rec.settledAt + rec.finalTtl * 1e3 : now + ttlOf(rec) * 1e3;
 var MAX_BODY_BYTES = 32 * 1024;
@@ -180,6 +183,8 @@ var LIMITS = {
   // polls per IP per hour (a household shares one IP)
   miss: { max: 200, window: 3600 },
   // unknown-code lookups per IP per hour: stops code guessing
+  paid: { max: 60, window: 3600 },
+  // "I paid" requests per IP per hour
   claim: { max: 40, window: 3600 }
   // per IP per hour: seat requests and FAILED token attempts (a valid token is never throttled)
 };
@@ -308,6 +313,7 @@ async function handleShare(req, store, now = Date.now(), limits = LIMITS, secret
         epoch: rec.epoch ?? 1,
         offer: publicOffer(rec, now),
         ttl: ttlOf(rec),
+        claims: Object.keys(rec.claims ?? {}),
         expiresAt: rec.expiresAt ?? rec.snapshot.updatedAt + ttlOf(rec) * 1e3
       });
     }
@@ -343,6 +349,10 @@ async function handleShare(req, store, now = Date.now(), limits = LIMITS, secret
             return { next: kept, res: json(200, { rev: kept.rev, epoch: kept.epoch ?? 1, ttl: ttlOf(kept), expiresAt: untilOf(kept, now) }) };
           }
           const next = { ...rec, snapshot, rev: rec.rev + 1 };
+          if (rec.claims) {
+            const kept = Object.fromEntries(Object.entries(rec.claims).filter(([k, t]) => !snapshot.paid[k] && now - t < CLAIM_TTL_MS));
+            next.claims = Object.keys(kept).length ? kept : void 0;
+          }
           const askedFinal = req.body?.finalTtlSeconds;
           if (snapshot.isEnded) {
             next.settledAt = rec.settledAt ?? now;
@@ -403,7 +413,32 @@ async function handleAction(req, store, code, now, limits, ip) {
       return { next, res: json(200, { ok: true, rev: next.rev }) };
     });
   }
+  if (action === "paid") {
+    if (method !== "POST") return err(405, "Method not allowed");
+    const key = typeof body.key === "string" ? body.key : "";
+    if (key.length > 260 || !CLAIM_KEY_RE.test(key)) return err(400, "Invalid payment");
+    if (await limited(store, `rl:paid:${ip}`, limits.paid)) return err(429, "Too many requests, try again later");
+    return mutate(store, code, now, async (rec2) => {
+      if (!rec2) return { res: await gone(store, code) };
+      if (rec2.snapshot.paid[key] || rec2.claims?.[key]) return { res: json(200, { ok: true }) };
+      const fresh = Object.fromEntries(Object.entries(rec2.claims ?? {}).filter(([, t]) => now - t < CLAIM_TTL_MS));
+      if (Object.keys(fresh).length >= MAX_CLAIMS) return { res: err(429, "The host has too many requests waiting") };
+      const next = { ...rec2, rev: rec2.rev + 1, claims: { ...fresh, [key]: now } };
+      return { next, res: json(200, { ok: true }) };
+    });
+  }
   const hostKey = req.headers["x-host-key"];
+  if (action === "ack") {
+    if (method !== "POST") return err(405, "Method not allowed");
+    const keys = Array.isArray(body.keys) ? body.keys.filter((k) => typeof k === "string").slice(0, MAX_CLAIMS) : [];
+    return mutate(store, code, now, async (rec2) => {
+      if (!rec2) return { res: await gone(store, code) };
+      if (!keyMatches(hostKey, rec2.keyHash)) return { res: err(403, "Only the host can change this table") };
+      if (!rec2.claims || !keys.some((k) => k in rec2.claims)) return { res: json(200, { ok: true }) };
+      const left = Object.fromEntries(Object.entries(rec2.claims).filter(([k]) => !keys.includes(k)));
+      return { next: { ...rec2, rev: rec2.rev + 1, claims: Object.keys(left).length ? left : void 0 }, res: json(200, { ok: true }) };
+    });
+  }
   if (action === "verify") {
     if (method !== "POST") return err(405, "Method not allowed");
     const rec2 = await load(store, code);

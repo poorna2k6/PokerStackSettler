@@ -312,3 +312,6 @@ input::placeholder { color: var(--muted); } input:focus { outline: none; color: 
 .standing .grow { min-width: 0; overflow-wrap: break-word; word-break: normal; }
 .note-card { padding: 12px 14px; border-radius: 14px; background: rgba(232,197,91,.14); border: 1px solid rgba(232,197,91,.35); }
 .note-card strong { display: block; margin-bottom: 2px; }
+.row.claim { gap: 8px; flex-wrap: wrap; }
+.row.claim .btn { flex: none; }
+.me-line .btn.slim { margin-left: 8px; }
