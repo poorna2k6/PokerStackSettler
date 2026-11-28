@@ -526,3 +526,20 @@ describe('fairer chip fixes', () => {
     expect(sanitizeChipsPerBuyIn(40, 10)).toBe(40);
   });
 });
+
+describe('typed amounts and renamed guests', () => {
+  it('a comma is a thousands separator or a decimal comma, never guessed otherwise', () => {
+    expect(toCents('1,234.56')).toBe(123456);
+    expect(toCents('$1,000')).toBe(100000);
+    expect(toCents('10,50')).toBe(1050);
+    expect(toCents('1,5')).toBe(150);
+    expect(toCents('1,2,3')).toBe(0);
+    expect(toCents('12,3456')).toBe(0);
+  });
+  it('a guest who is later added as a player keeps their share', () => {
+    const pl = (id: string, name: string) => ({ id, name, buyInCents: 1000, cashOutCents: 1000 });
+    const bills = [{ id: 'b', label: 'Beer', cents: 900, payerId: 'a', sharedBy: ['b', 'guest:joe'] }];
+    const a = solve([pl('a', 'Al'), pl('b', 'Bo'), pl('j', 'joe')], 0, 10, bills);
+    expect(a.players.map(p => p.shareCents)).toEqual([0, 450, 450]); // Joe is now a player and still pays his half
+  });
+});

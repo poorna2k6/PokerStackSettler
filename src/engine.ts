@@ -92,7 +92,14 @@ export const GUEST_PREFIX = 'guest:';
  */
 export function toCents(val: unknown): number {
   const str = typeof val === 'number' ? (Number.isFinite(val) ? String(val) : '') : String(val ?? '');
-  const m = /^(-?)(\d*)(?:\.(\d*))?$/.exec(str.replace(/[$,\s]/g, ''));
+  // A comma is either a thousands separator (1,234.50) or a decimal comma (10,50); anything else is not guessed at.
+  let t = str.replace(/[$\s]/g, '');
+  if (t.includes(',')) {
+    if (/^-?\d{1,3}(,\d{3})+(\.\d*)?$/.test(t)) t = t.replace(/,/g, '');
+    else if (/^-?\d+,\d{1,2}$/.test(t)) t = t.replace(',', '.');
+    else return 0;
+  }
+  const m = /^(-?)(\d*)(?:\.(\d*))?$/.exec(t);
   if (!m || (m[2] === '' && !m[3])) return 0;
   const whole = Number(m[2] || '0');
   const frac = (m[3] ?? '').padEnd(3, '0');
@@ -344,14 +351,15 @@ export function solve(
   }
   const guests = [...guestMap.values()];
   // Bills shared by everyone are pooled and split together; a bill with a chosen list is split between just those people.
-  const people: { id: string; add: (c: number) => void }[] = [
-    ...clean.map(p => ({ id: p.id, add: (c: number) => { p.shareCents += c; } })),
+  // a player who has the same name as a guest IS that guest (e.g. added later), so the guest's old id still counts for them
+  const people: { id: string; alias?: string; add: (c: number) => void }[] = [
+    ...clean.map(p => ({ id: p.id, alias: `${GUEST_PREFIX}${p.name.trim().toLowerCase()}`, add: (c: number) => { p.shareCents += c; } })),
     ...guests.map(g => ({ id: g.id, add: (c: number) => { g.shareCents += c; } }))
   ];
   let pooled = 0;
   for (const b of validBills) {
     const cents = Math.round(b.cents);
-    const chosen = b.sharedBy?.length ? people.filter(x => b.sharedBy!.includes(x.id)) : [];
+    const chosen = b.sharedBy?.length ? people.filter(x => b.sharedBy!.includes(x.id) || (x.alias !== undefined && b.sharedBy!.includes(x.alias))) : [];
     if (chosen.length === 0) { pooled += cents; continue; }
     splitEvenly(cents, chosen.length).forEach((c, i) => chosen[i].add(c));
   }

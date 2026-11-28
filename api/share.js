@@ -10,7 +10,13 @@ var MAX_GUESTS = 8;
 var MAX_BILL_CENTS = 1e7;
 function toCents(val) {
   const str = typeof val === "number" ? Number.isFinite(val) ? String(val) : "" : String(val ?? "");
-  const m = /^(-?)(\d*)(?:\.(\d*))?$/.exec(str.replace(/[$,\s]/g, ""));
+  let t = str.replace(/[$\s]/g, "");
+  if (t.includes(",")) {
+    if (/^-?\d{1,3}(,\d{3})+(\.\d*)?$/.test(t)) t = t.replace(/,/g, "");
+    else if (/^-?\d+,\d{1,2}$/.test(t)) t = t.replace(",", ".");
+    else return 0;
+  }
+  const m = /^(-?)(\d*)(?:\.(\d*))?$/.exec(t);
   if (!m || m[2] === "" && !m[3]) return 0;
   const whole = Number(m[2] || "0");
   const frac = (m[3] ?? "").padEnd(3, "0");

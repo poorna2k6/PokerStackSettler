@@ -35,6 +35,7 @@ export function openExpenses(onDone?: () => void) {
         ...(bills.length ? [h('div', { class: 'section-title' }, h('span', { text: 'Per person: poker → after expenses' })), ...(unbalanced ? [h('p', { class: 'muted small', text: 'The chips don’t balance yet, so these amounts will change once they do.' })] : []), group(
           ...a.players.map(p => h('div', { class: 'row' }, h('span', { class: 'grow', text: p.name }), amountCol(p.netCents, p.finalCents))),
           ...a.guests.map(g => h('div', { class: 'row' }, h('span', { class: 'grow', text: `${g.name} (not playing)` }), amountCol(0, g.finalCents))))] : []),
+        ...(!locked && bills.length >= MAX_BILLS ? [h('p', { class: 'muted small', text: `You can add up to ${MAX_BILLS} expenses. Delete one to add another.` })] : []),
         ...(locked ? [h('p', { class: 'muted small', text: 'The session is settled and locked. Reopen it on the Table tab to change expenses.' })] : [h('button', { class: 'btn tinted block', text: '＋ Add expense', attrs: { disabled: bills.length >= MAX_BILLS }, on: { click: () => openBillForm() } })]),
         h('button', { class: `btn ${onDone ? 'primary' : 'plain'} block`, text: onDone ? 'Continue' : 'Done', on: { click: () => { close(); onDone?.(); } } }));
     };

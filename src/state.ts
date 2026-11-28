@@ -267,7 +267,7 @@ export function removePlayer(id: string) {
   // an expense this player paid stays: it is now paid by someone who is not in the list
   if (gone) note(`${gone.name} left the table`);
   if (gone) for (const b of state.session.bills ?? []) if (b.payerId === id) { delete b.payerId; b.guest = gone.name; }
-  for (const b of state.session.bills ?? []) if (b.sharedBy) { b.sharedBy = b.sharedBy.filter(x => x !== id); if (!b.sharedBy.length) delete b.sharedBy; }
+  dropEmptied(state.session.bills ?? [], b => { b.sharedBy = b.sharedBy!.filter(x => x !== id); });
   state.session.players = state.session.players.filter(p => p.id !== id);
   state.session.paid = {}; // who pays whom changes when someone leaves
   commit();
@@ -312,10 +312,22 @@ function pruneShares() {
   const s = state.session;
   const players = new Set(s.players.map(p => p.name.trim().toLowerCase()));
   const guests = new Set((s.bills ?? []).filter(b => !b.payerId && b.guest && !players.has(b.guest.trim().toLowerCase())).map(b => `guest:${b.guest!.trim().toLowerCase()}`));
-  for (const b of s.bills ?? []) if (b.sharedBy) {
-    b.sharedBy = b.sharedBy.filter(x => !x.startsWith('guest:') || guests.has(x));
-    if (!b.sharedBy.length) delete b.sharedBy;
+  dropEmptied(s.bills ?? [], b => { b.sharedBy = b.sharedBy!.filter(x => !x.startsWith('guest:') || guests.has(x) || players.has(x.slice('guest:'.length))); });
+}
+
+/**
+ * Runs `prune` on every bill that has a chosen list of sharers. A bill whose last sharer is gone has nobody left to
+ * split it, so it is removed (and logged) instead of silently turning into "shared by everyone".
+ */
+function dropEmptied(bills: Bill[], prune: (b: Bill) => void) {
+  const keep: Bill[] = [];
+  for (const b of bills) {
+    if (!b.sharedBy) { keep.push(b); continue; }
+    prune(b);
+    if (b.sharedBy.length) keep.push(b);
+    else note(`Removed expense “${b.label}”: nobody left to share it`);
   }
+  state.session.bills = keep;
 }
 
 export function removeBill(id: string) {
